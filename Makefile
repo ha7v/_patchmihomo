@@ -41,7 +41,6 @@ DLM_OBJS := src/misc/misc_main.o \
 	src/misc/xt/xt_reg.o \
 	src/misc/xt/xt_addrtype.o \
 	src/misc/devtmpfs/devtmpfs.o \
-	src/misc/pts_shield/pts_shield.o \
 	src/misc/userns/userns_core.o \
 	src/misc/userns/userns_map.o \
 	src/misc/userns/userns_cred.o \
@@ -99,7 +98,7 @@ ccflags-y += -I$(src)/src/main/ipcns -I$(src)/src/main/ipcns/sysv
 ccflags-y += -I$(src)/src/main/ipcns/mqueue -I$(src)/src/main/ipcns/sysctl
 ccflags-y += -I$(src)/src/main/ipcns/compat
 ccflags-y += -I$(src)/src/misc -I$(src)/src/misc/xt -I$(src)/src/misc/userns
-ccflags-y += -I$(src)/src/misc/devtmpfs -I$(src)/src/misc/pts_shield
+ccflags-y += -I$(src)/src/misc/devtmpfs
 ccflags-y += $(addprefix -I$(src)/,$(DEPS_INCS_ALL))
 
 # the target kernel's own tree, which the ddk lays out at $(KDIR)/source. a few
