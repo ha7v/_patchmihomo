@@ -39,7 +39,7 @@
 struct droid_lkm_clone_ctx;
 __nocfi noinline int droid_lkm_clone_ctx_enter(unsigned long flags, struct droid_lkm_clone_ctx *ctx);
 __nocfi noinline void droid_lkm_clone_ctx_leave(struct droid_lkm_clone_ctx *ctx);
-__nocfi noinline struct nsproxy *droid_lkm_cnn_wrap(unsigned long flags, struct task_struct *tsk, struct user_namespace *user_ns, struct fs_struct *fs);
+DROID_LKM_ENTRY __nocfi noinline struct nsproxy *droid_lkm_cnn_wrap(unsigned long flags, struct task_struct *tsk, struct user_namespace *user_ns, struct fs_struct *fs);
 DROID_LKM_ENTRY __nocfi noinline int droid_lkm_cn_wrap(unsigned long flags, struct task_struct *tsk);
 
 typedef long (*droid_lkm_syscall_fn)(const struct pt_regs *regs);
@@ -176,7 +176,7 @@ static __nocfi noinline long droid_lkm_ipc_orig_call(droid_lkm_syscall_fn *orig,
  */
 #define DROID_LKM_IPC_THUNK(name)						\
 	static droid_lkm_syscall_fn droid_lkm_orig_##name;			\
-	static long droid_lkm_thunk_##name(const struct pt_regs *regs)		\
+	static DROID_LKM_ENTRY long droid_lkm_thunk_##name(const struct pt_regs *regs) \
 	{									\
 		if (droid_lkm_gate_allow())					\
 			return __arm64_sys_##name(regs);			\
@@ -190,7 +190,7 @@ static __nocfi noinline long droid_lkm_ipc_orig_call(droid_lkm_syscall_fn *orig,
 #ifdef CONFIG_COMPAT
 #define DROID_LKM_IPC_THUNK32(name, sym32)					\
 	static droid_lkm_syscall_fn droid_lkm_orig32_##name;			\
-	static long droid_lkm_thunk32_##name(const struct pt_regs *regs)	\
+	static DROID_LKM_ENTRY long droid_lkm_thunk32_##name(const struct pt_regs *regs) \
 	{									\
 		if (droid_lkm_gate_allow())					\
 			return __arm64_##sym32(regs);				\
@@ -625,7 +625,7 @@ DROID_LKM_ENTRY __nocfi noinline void droid_lkm_free_nsproxy_wrap(struct nsproxy
 }
 
 #ifdef DROID_LKM_NATIVE_PID
-static void droid_lkm_free_nsproxy_call(struct nsproxy *ns)
+static DROID_LKM_ENTRY __nocfi noinline void droid_lkm_free_nsproxy_call(struct nsproxy *ns)
 {
 	ds_hook_enter(&droid_lkm_free_nsproxy_hook);
 	droid_lkm_free_nsproxy_orig(ns);
@@ -687,7 +687,12 @@ static int droid_lkm_nsproxy_release_hooks_install(void)
 		ret = ds_hook_install(&droid_lkm_free_nsproxy_hook, "free_nsproxy",
 				      "droid_lkm_free_nsproxy_wrap");
 		if (ret) {
+			if (droid_lkm_do_exit_hook.live) {
+				ds_hook_remove(&droid_lkm_do_exit_hook);
+				droid_lkm_do_exit_orig = NULL;
+			}
 			ds_hook_remove(&droid_lkm_exit_ns_hook);
+			droid_lkm_exit_ns_orig = NULL;
 			ds_hook_remove(&droid_lkm_switch_hook);
 			droid_lkm_switch_orig = NULL;
 			return ret;
@@ -712,7 +717,7 @@ static __nocfi noinline struct nsproxy *droid_lkm_cnn_call(unsigned long flags,
 	return nsp;
 }
 
-__nocfi noinline struct nsproxy *droid_lkm_cnn_wrap(unsigned long flags,
+DROID_LKM_ENTRY __nocfi noinline struct nsproxy *droid_lkm_cnn_wrap(unsigned long flags,
 					     struct task_struct *tsk,
 					     struct user_namespace *user_ns,
 					     struct fs_struct *fs)
@@ -797,7 +802,7 @@ static __nocfi noinline int droid_lkm_cn_call(unsigned long flags,
 	return ret;
 }
 
-__nocfi noinline int droid_lkm_cn_wrap(unsigned long flags, struct task_struct *tsk)
+DROID_LKM_ENTRY __nocfi noinline int droid_lkm_cn_wrap(unsigned long flags, struct task_struct *tsk)
 {
 	bool want_pid = flags & CLONE_NEWPID;
 	bool want_ipc = flags & CLONE_NEWIPC;
@@ -990,7 +995,7 @@ static __nocfi noinline long droid_lkm_unshare_legacy(const struct pt_regs *regs
 	return ret;
 }
 
-static __nocfi noinline long droid_lkm_sys_unshare(const struct pt_regs *regs)
+static DROID_LKM_ENTRY __nocfi noinline long droid_lkm_sys_unshare(const struct pt_regs *regs)
 {
 	unsigned long flags = regs->regs[0];
 	long ret;
@@ -1036,7 +1041,7 @@ static __nocfi noinline long droid_lkm_sys_unshare(const struct pt_regs *regs)
 bool droid_lkm_slot_skip_sysvipc(void) { return droid_lkm_skip_sysvipc; }
 bool droid_lkm_slot_no_fake_ns(void) { return droid_lkm_no_fake_ns; }
 
-static __nocfi noinline long droid_lkm_sys_reboot(const struct pt_regs *regs)
+static DROID_LKM_ENTRY __nocfi noinline long droid_lkm_sys_reboot(const struct pt_regs *regs)
 {
 	int magic1 = (int)regs->regs[0];
 	int magic2 = (int)regs->regs[1];
@@ -1194,7 +1199,7 @@ static __nocfi noinline bool droid_lkm_clone_ns_ready(unsigned long flags)
 	       droid_lkm_ks.switch_task_namespaces && droid_lkm_gate_allow();
 }
 
-static __nocfi noinline long droid_lkm_sys_clone(const struct pt_regs *regs)
+static DROID_LKM_ENTRY __nocfi noinline long droid_lkm_sys_clone(const struct pt_regs *regs)
 {
 	struct droid_lkm_clone_ctx ctx;
 	struct pt_regs tmp;
@@ -1219,7 +1224,7 @@ static __nocfi noinline long droid_lkm_sys_clone(const struct pt_regs *regs)
 	return ret;
 }
 
-static __nocfi noinline long droid_lkm_sys_clone3(const struct pt_regs *regs)
+static DROID_LKM_ENTRY __nocfi noinline long droid_lkm_sys_clone3(const struct pt_regs *regs)
 {
 	void __user *uargs = (void __user *)regs->regs[0];
 	size_t usize = (size_t)regs->regs[1];
@@ -1375,6 +1380,7 @@ int droid_lkm_slot_init(void)
 	droid_lkm_copy_namespaces_hook_install();
 	if (droid_lkm_nsproxy_release_hooks_install()) {
 		droid_lkm_err("nsproxy release hooks unavailable, refusing load\n");
+		droid_lkm_slot_exit();
 		return -ENODATA;
 	}
 	droid_lkm_clone_slot_install();
@@ -1392,6 +1398,22 @@ void droid_lkm_slot_exit(void)
 {
 	int i;
 
+	if (droid_lkm_free_nsproxy_hook.live) {
+		ds_hook_remove(&droid_lkm_free_nsproxy_hook);
+		droid_lkm_free_nsproxy_orig = NULL;
+	}
+	if (droid_lkm_do_exit_hook.live) {
+		ds_hook_remove(&droid_lkm_do_exit_hook);
+		droid_lkm_do_exit_orig = NULL;
+	}
+	if (droid_lkm_exit_ns_hook.live) {
+		ds_hook_remove(&droid_lkm_exit_ns_hook);
+		droid_lkm_exit_ns_orig = NULL;
+	}
+	if (droid_lkm_switch_hook.live) {
+		ds_hook_remove(&droid_lkm_switch_hook);
+		droid_lkm_switch_orig = NULL;
+	}
 	if (droid_lkm_cnn_hooked) {
 		ds_hook_remove(&droid_lkm_cnn_hook);
 		droid_lkm_cnn_hooked = false;

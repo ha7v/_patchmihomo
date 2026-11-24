@@ -507,7 +507,6 @@ int droid_lkm_mqueue_shim_init(void)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
 	/* get_ucounts is an inline here, the symbol test would drop the charge */
 	if (!droid_lkm_ks.ucounts_put ||
-!droid_lkm_ks.ucounts_put ||
 	    !droid_lkm_ks.ucounts_inc_rlimit || !droid_lkm_ks.ucounts_dec_rlimit)
 		droid_lkm_warn("mqueue: RLIMIT_MSGQUEUE accounting unavailable, queues not charged\n");
 #endif

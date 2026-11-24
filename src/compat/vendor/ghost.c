@@ -26,7 +26,7 @@
 #include "hk_inline.h"
 
 /* 6.18 builds with -Wmissing-prototypes */
-__nocfi noinline struct task_struct *dlc_ftbv_wrap(pid_t vnr);
+DROID_LKM_ENTRY __nocfi noinline struct task_struct *dlc_ftbv_wrap(pid_t vnr);
 
 #define DLC_GHOST_TASK_COMM	"ghost-task-sentinel"
 #define DLC_GHOST_LOG_MAX	3
@@ -62,7 +62,7 @@ static bool dlc_ghost_match_module(const char *name)
 	return strncmp(name, dlc_ghost_match, n) == 0;
 }
 
-static inline bool dlc_ghost_is_vendor(unsigned long ret_ip)
+static inline bool __nocfi dlc_ghost_is_vendor(unsigned long ret_ip)
 {
 	unsigned long page = ret_ip & PAGE_MASK;
 	struct module *mod;
@@ -105,7 +105,7 @@ static inline bool dlc_ghost_is_vendor(unsigned long ret_ip)
 }
 
 // _RET_IP_ must be read before calling orig
-__nocfi noinline struct task_struct *dlc_ftbv_wrap(pid_t vnr)
+DROID_LKM_ENTRY __nocfi noinline struct task_struct *dlc_ftbv_wrap(pid_t vnr)
 {
 	unsigned long ret_ip = (unsigned long)_RET_IP_;
 	typeof(&find_task_by_vpid) orig;

@@ -311,8 +311,7 @@ static inline void droid_lkm_pidns_set_reboot(struct pid_namespace *ns, int val)
 /* ipc side, refuses to load when the target kernel has no locked unmap entry */
 int droid_lkm_munmap_init(void);
 
-/* reached indirectly so the entry needs a bti landing pad on a real device */
-#define DROID_LKM_ENTRY __attribute__((target("branch-protection=bti")))
+/* DROID_LKM_ENTRY is provided by ds_compat.h */
 
 #define droid_lkm_info(fmt, ...) pr_info("[I] [" DROID_LKM_TAG "] " fmt, ##__VA_ARGS__)
 #define droid_lkm_warn(fmt, ...) pr_warn("[W] [" DROID_LKM_TAG "] " fmt, ##__VA_ARGS__)

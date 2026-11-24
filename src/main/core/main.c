@@ -217,6 +217,7 @@ static int __init droid_lkm_init(void)
 
 err_slot:
 	droid_lkm_ready = false;
+	droid_lkm_status_exit();
 	droid_lkm_features_exit();
 	droid_lkm_proc_exit();
 	droid_lkm_slot_exit();

@@ -160,7 +160,7 @@ static struct dentry *droid_lkm_ns_kind_lookup(struct dentry *dentry,
 	return droid_lkm_ns_instantiate(dentry, task, ops);
 }
 
-static __nocfi noinline struct dentry *droid_lkm_ns_lookup(struct inode *dir, struct dentry *dentry,
+static DROID_LKM_ENTRY __nocfi noinline struct dentry *droid_lkm_ns_lookup(struct inode *dir, struct dentry *dentry,
 				   unsigned int flags)
 {
 	enum droid_lkm_ns_kind kind;
@@ -221,6 +221,8 @@ static __nocfi noinline struct dentry *droid_lkm_ns_lookup(struct inode *dir, st
 	put_task_struct(task);
 	return res;
 }
+
+static bool droid_lkm_proc_pinned;
 
 static int droid_lkm_proc_steal_ns_link_iops(void)
 {
@@ -311,6 +313,7 @@ int droid_lkm_proc_init(void)
 		droid_lkm_orig_ns_lookup = NULL;
 		return -EBUSY;
 	}
+	droid_lkm_proc_pinned = true;
 	droid_lkm_dbg("ns hook is permanent: module pinned (rmmod -> -EBUSY)\n");
 
 	/*
@@ -333,5 +336,9 @@ void droid_lkm_proc_exit(void)
 	if (droid_lkm_nsdir_hook.live) {
 		ds_hook_remove(&droid_lkm_nsdir_hook);
 		droid_lkm_orig_ns_lookup = NULL;
+	}
+	if (droid_lkm_proc_pinned) {
+		module_put(THIS_MODULE);
+		droid_lkm_proc_pinned = false;
 	}
 }

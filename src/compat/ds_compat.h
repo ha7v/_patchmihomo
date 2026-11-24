@@ -8,6 +8,11 @@
 
 #include <linux/types.h>
 
+/* reached indirectly via hook trampoline or slot table; needs a BTI landing pad */
+#ifndef DROID_LKM_ENTRY
+#define DROID_LKM_ENTRY __attribute__((target("branch-protection=bti")))
+#endif
+
 enum ds_compat_state {
 	DS_COMPAT_OK = 0,
 	DS_COMPAT_NO_TYPE,	/* the running kernel has no such struct in BTF */
