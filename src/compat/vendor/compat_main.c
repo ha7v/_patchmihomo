@@ -11,6 +11,7 @@
 #include "ds_compat.h"
 #include "ds_hook.h"
 #include "hk.h"
+#include "hk_patch.h"
 #include "ghost.h"
 #include "ddl_hit.h"
 #include "vendor_syms.h"
@@ -22,6 +23,7 @@ static unsigned long __nocfi dlc_hk_resolve(const char *name)
 
 static const struct hk_cfg dlc_hk_cfg = {
 	.resolve = dlc_hk_resolve,
+	.write = hk_write_kernel,
 };
 
 static int __init droid_lkm_vendor_init(void)

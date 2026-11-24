@@ -11,6 +11,8 @@
 #include <linux/pid_namespace.h>
 #include <linux/rcupdate.h>
 #include <linux/list.h>
+#include <linux/atomic.h>
+#include <linux/slab.h>
 #include <linux/refcount.h>
 #include <linux/string.h>
 #include <linux/preempt.h>
@@ -30,6 +32,7 @@ DROID_LKM_ENTRY __nocfi noinline struct task_struct *dlc_ftbv_wrap(pid_t vnr);
 
 #define DLC_GHOST_TASK_COMM	"ghost-task-sentinel"
 #define DLC_GHOST_LOG_MAX	3
+#define DLC_GHOST_SIZE_MAX	(64U * 1024U)
 
 static bool dlc_ghost_enable = true;
 module_param_named(ghost, dlc_ghost_enable, bool, 0444);
@@ -42,9 +45,9 @@ MODULE_PARM_DESC(ghost_match, "caller module name prefix, * matches all, default
 static typeof(&find_task_by_vpid) dlc_ftbv_orig;
 static typeof(&__module_address) dlc_module_address;
 static struct ds_hook dlc_ftbv_hook;
-static struct task_struct dlc_ghost_task;
+static struct task_struct *dlc_ghost_task;
 static bool dlc_ghost_ready;
-static unsigned int dlc_ghost_hits;
+static atomic_t dlc_ghost_hits = ATOMIC_INIT(0);
 
 /* Hot-path Midas fixed page & single-entry MRU for other vendor callers (16 bytes total) */
 static unsigned long dlc_midas_page;
@@ -81,10 +84,15 @@ static inline bool __nocfi dlc_ghost_is_vendor(unsigned long ret_ip)
 
 	/* Slow path: parse kernel module tree */
 	if (dlc_module_address) {
+		bool is_midas = false;
+
 		preempt_disable();
 		mod = dlc_module_address(ret_ip);
-		if (mod)
+		if (mod) {
 			match = dlc_ghost_match_module(mod->name);
+			if (match)
+				is_midas = strcmp(mod->name, "oplus_bsp_midas") == 0;
+		}
 		preempt_enable();
 
 		if (match) {
@@ -93,8 +101,7 @@ static inline bool __nocfi dlc_ghost_is_vendor(unsigned long ret_ip)
 			 * Bind to dlc_midas_page if not yet set or module is oplus_bsp_midas;
 			 * otherwise store in the general MRU slot.
 			 */
-			if (!READ_ONCE(dlc_midas_page) ||
-			    (mod && strcmp(mod->name, "oplus_bsp_midas") == 0))
+			if (!READ_ONCE(dlc_midas_page) || is_midas)
 				WRITE_ONCE(dlc_midas_page, page);
 			else
 				WRITE_ONCE(dlc_other_mru_page, page);
@@ -159,12 +166,15 @@ DROID_LKM_ENTRY __nocfi noinline struct task_struct *dlc_ftbv_wrap(pid_t vnr)
 	 * Task is dead or in !orig microsecond race window; hand out
 	 * sentinel to avert vendor driver null dereference panic.
 	 */
-	dlc_ghost_hits++;
-	if (dlc_ghost_hits <= DLC_GHOST_LOG_MAX)
+	task = READ_ONCE(dlc_ghost_task);
+	if (!task)
+		return NULL;
+	if (atomic_read(&dlc_ghost_hits) < DLC_GHOST_LOG_MAX &&
+	    atomic_inc_return(&dlc_ghost_hits) <= DLC_GHOST_LOG_MAX)
 		pr_info("[I] [droid_lkm_vendor] ghost: pid=%d caller=%pS -> %s (orig=%s)\n",
 			(int)vnr, (void *)ret_ip, DLC_GHOST_TASK_COMM,
 			orig ? "miss" : "race-guard");
-	return &dlc_ghost_task;
+	return task;
 }
 
 enum {
@@ -243,16 +253,28 @@ static int dlc_ghost_layout(void)
 	return 0;
 }
 
-static void *dlc_ghost_at(unsigned int field)
+static bool dlc_ghost_field_fits(unsigned int field, u32 width, u32 alloc_sz)
 {
-	return (char *)&dlc_ghost_task + dlc_ghost_fields[field].live;
+	u8 st = dlc_ghost_fields[field].state;
+	u32 off = dlc_ghost_fields[field].live;
+
+	if (st != DS_COMPAT_OK && st != DS_COMPAT_VERIFIED &&
+	    st != DS_COMPAT_ANCHORED)
+		return false;
+	return off <= alloc_sz && width <= alloc_sz - off;
+}
+
+static void *dlc_ghost_at(struct task_struct *ghost, unsigned int field)
+{
+	return (char *)ghost + dlc_ghost_fields[field].live;
 }
 
 // ghost is a shallow copy of init_task, list heads re-init to self
 static int dlc_ghost_build(void)
 {
 	unsigned long init_task_addr = dlc_vendor_syms.init_task;
-	unsigned int copy, i;
+	struct task_struct *ghost;
+	u32 alloc_sz, copy, i;
 	int ret;
 
 	if (!init_task_addr)
@@ -265,11 +287,35 @@ static int dlc_ghost_build(void)
 		return ret;
 	}
 
-	// the running kernel's task_struct may be smaller than this build's
-	copy = sizeof(dlc_ghost_task);
-	if (dlc_ghost_size < copy)
-		copy = dlc_ghost_size;
-	memcpy(&dlc_ghost_task, (void *)init_task_addr, copy);
+	/*
+	 * OEM kernels routinely extend struct task_struct past the GKI build
+	 * header size; allocate for the live size so both our field writes and
+	 * vendor reads of trailing OEM fields stay in bounds
+	 */
+	alloc_sz = max_t(u32, sizeof(struct task_struct), dlc_ghost_size);
+	if (alloc_sz > DLC_GHOST_SIZE_MAX) {
+		pr_err("[E] [droid_lkm_vendor] ghost: implausible task_struct size %u\n",
+		       alloc_sz);
+		return -EINVAL;
+	}
+
+	if (!dlc_ghost_field_fits(DLC_GHOST_F_COMM, TASK_COMM_LEN, alloc_sz) ||
+	    !dlc_ghost_field_fits(DLC_GHOST_F_PID, sizeof(pid_t), alloc_sz) ||
+	    !dlc_ghost_field_fits(DLC_GHOST_F_TGID, sizeof(pid_t), alloc_sz) ||
+	    !dlc_ghost_field_fits(DLC_GHOST_F_USAGE, sizeof(refcount_t), alloc_sz) ||
+	    (dlc_ghost_fields[DLC_GHOST_F_TASKS].live &&
+	     !dlc_ghost_field_fits(DLC_GHOST_F_TASKS, sizeof(struct list_head), alloc_sz))) {
+		pr_err("[E] [droid_lkm_vendor] ghost: task_struct field offsets out of bounds (size=%u)\n",
+		       alloc_sz);
+		return -ERANGE;
+	}
+
+	ghost = kzalloc(alloc_sz, GFP_KERNEL);
+	if (!ghost)
+		return -ENOMEM;
+
+	copy = min_t(u32, alloc_sz, dlc_ghost_size);
+	memcpy(ghost, (void *)init_task_addr, copy);
 
 	/*
 	 * an empty list head in init_task points at itself, so every one of them
@@ -277,25 +323,46 @@ static int dlc_ghost_build(void)
 	 * is linked into the live task list, not self linked, and is reset below
 	 */
 	for (i = 0; i + 16 <= copy; i += 8) {
-		unsigned long *p = (unsigned long *)((char *)&dlc_ghost_task + i);
+		unsigned long *p = (unsigned long *)((char *)ghost + i);
 
 		if (p[0] != init_task_addr + i || p[1] != init_task_addr + i)
 			continue;
-		p[0] = (unsigned long)&dlc_ghost_task + i;
+		p[0] = (unsigned long)ghost + i;
 		p[1] = p[0];
 	}
 	if (dlc_ghost_fields[DLC_GHOST_F_TASKS].live)
-		INIT_LIST_HEAD(dlc_ghost_at(DLC_GHOST_F_TASKS));
+		INIT_LIST_HEAD(dlc_ghost_at(ghost, DLC_GHOST_F_TASKS));
 
-	strscpy(dlc_ghost_at(DLC_GHOST_F_COMM), DLC_GHOST_TASK_COMM, TASK_COMM_LEN);
+	strscpy(dlc_ghost_at(ghost, DLC_GHOST_F_COMM), DLC_GHOST_TASK_COMM, TASK_COMM_LEN);
 	// vendors index PID_MAX_DEFAULT sized arrays by p->pid
 	// init_task.thread_pid is init_struct_pid nr 0 so the vnr helpers agree
-	*(pid_t *)dlc_ghost_at(DLC_GHOST_F_PID) = 0;
-	*(pid_t *)dlc_ghost_at(DLC_GHOST_F_TGID) = 0;
-	refcount_set((refcount_t *)dlc_ghost_at(DLC_GHOST_F_USAGE), 0x40000000);
+	*(pid_t *)dlc_ghost_at(ghost, DLC_GHOST_F_PID) = 0;
+	*(pid_t *)dlc_ghost_at(ghost, DLC_GHOST_F_TGID) = 0;
+	refcount_set((refcount_t *)dlc_ghost_at(ghost, DLC_GHOST_F_USAGE), 0x40000000);
+	WRITE_ONCE(dlc_ghost_task, ghost);
 	smp_wmb();
 	WRITE_ONCE(dlc_ghost_ready, true);
 	return 0;
+}
+
+static void dlc_ghost_free_task(bool hooked)
+{
+	struct task_struct *ghost;
+
+	WRITE_ONCE(dlc_ghost_ready, false);
+	ghost = READ_ONCE(dlc_ghost_task);
+	if (!ghost)
+		return;
+	WRITE_ONCE(dlc_ghost_task, NULL);
+	if (hooked) {
+		synchronize_rcu();
+		if (refcount_read((refcount_t *)dlc_ghost_at(ghost, DLC_GHOST_F_USAGE)) !=
+		    0x40000000) {
+			pr_warn("[W] [droid_lkm_vendor] ghost: sentinel still referenced at exit, keeping allocation\n");
+			return;
+		}
+	}
+	kfree(ghost);
 }
 
 static void dlc_ghost_prewarm(void)
@@ -321,8 +388,13 @@ static void dlc_ghost_prewarm(void)
 
 void dlc_ghost_exit(void)
 {
-	ds_hook_remove(&dlc_ftbv_hook);
-	dlc_ghost_ready = false;
+	bool was_live = dlc_ftbv_hook.live;
+
+	WRITE_ONCE(dlc_ghost_ready, false);
+	if (was_live)
+		ds_hook_remove(&dlc_ftbv_hook);
+	WRITE_ONCE(dlc_ftbv_orig, NULL);
+	dlc_ghost_free_task(was_live);
 }
 
 int dlc_ghost_init(void)
@@ -334,7 +406,7 @@ int dlc_ghost_init(void)
 
 	ret = dlc_ghost_build();
 	if (ret) {
-		pr_err("[E] [droid_lkm_vendor] ghost: init_task not found\n");
+		pr_err("[E] [droid_lkm_vendor] ghost: template build failed (%d)\n", ret);
 		return ret;
 	}
 
@@ -343,7 +415,7 @@ int dlc_ghost_init(void)
 	dlc_module_address = (typeof(dlc_module_address))dlc_vendor_syms.module_address;
 	if (!dlc_module_address) {
 		pr_err("[E] [droid_lkm_vendor] ghost: __module_address not found\n");
-		dlc_ghost_ready = false;
+		dlc_ghost_free_task(false);
 		return -ENOENT;
 	}
 
@@ -363,7 +435,7 @@ int dlc_ghost_init(void)
 			pr_err("[E] [droid_lkm_vendor] ghost: find_task_by_vpid entry state %d (%s) target 0x%lx, inline hook refused\n",
 			       probe.state, probe.reason ? probe.reason : "?",
 			       probe.target);
-			dlc_ghost_ready = false;
+			dlc_ghost_free_task(false);
 			return -EOPNOTSUPP;
 		}
 	}
@@ -371,7 +443,7 @@ int dlc_ghost_init(void)
 	ret = ds_hook_install(&dlc_ftbv_hook, "find_task_by_vpid", "dlc_ftbv_wrap");
 	if (ret) {
 		pr_err("[E] [droid_lkm_vendor] ghost: hook find_task_by_vpid failed %d\n", ret);
-		dlc_ghost_ready = false;
+		dlc_ghost_free_task(false);
 		return ret;
 	}
 	smp_wmb();

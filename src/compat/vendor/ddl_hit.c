@@ -28,8 +28,18 @@ enum {
 };
 
 static struct ds_compat_field dlc_ddl_fields[DLC_DDL_F_COUNT] = {
-	[DLC_DDL_F_PID] = { .type = "task_struct", .member = "pid" },
-	[DLC_DDL_F_COMM] = { .type = "task_struct", .member = "comm" },
+	[DLC_DDL_F_PID] = {
+		.type = "task_struct",
+		.member = "pid",
+		.build = offsetof(struct task_struct, pid),
+		.build_size = sizeof(pid_t),
+	},
+	[DLC_DDL_F_COMM] = {
+		.type = "task_struct",
+		.member = "comm",
+		.build = offsetof(struct task_struct, comm),
+		.build_size = TASK_COMM_LEN,
+	},
 };
 
 static struct ds_compat_type dlc_ddl_types[] = {
@@ -70,7 +80,7 @@ static DROID_LKM_ENTRY __nocfi noinline void dlc_ddl_update_wrap(struct task_str
 {
 	struct dlc_ddl_entry *entry;
 	void *base = dlc_vendor_syms.ddl_sdata;
-	const char *comm;
+	char comm[TASK_COMM_LEN];
 	pid_t pid;
 
 	if (dlc_ddl_hook.how == HK_REDIR_KPROBE)
@@ -83,10 +93,11 @@ static DROID_LKM_ENTRY __nocfi noinline void dlc_ddl_update_wrap(struct task_str
 	if (pid <= 0 || pid >= PID_MAX_DEFAULT)
 		return;
 
-	comm = (const char *)p + dlc_ddl_comm_off;
+	memcpy(comm, (const char *)p + dlc_ddl_comm_off, TASK_COMM_LEN);
+	comm[TASK_COMM_LEN - 1] = '\0';
+
 	entry = (struct dlc_ddl_entry *)base + pid;
-	if (!entry->comm[0] ||
-	    strncmp(comm, entry->comm, strnlen(comm, TASK_COMM_LEN))) {
+	if (!entry->comm[0] || strncmp(comm, entry->comm, TASK_COMM_LEN)) {
 		memset(entry, 0, sizeof(*entry));
 		strscpy(entry->comm, comm, TASK_COMM_LEN);
 	}
