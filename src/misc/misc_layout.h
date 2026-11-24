@@ -47,6 +47,7 @@ static inline struct nsproxy *droid_lkm_misc_task_nsproxy(const struct task_stru
 }
 
 void droid_lkm_misc_layout_init(void);
+void droid_lkm_misc_layout_exit(void);
 void droid_lkm_misc_layout_report(void);
 
 /* false until the engine vouches for every offset this module dereferences */

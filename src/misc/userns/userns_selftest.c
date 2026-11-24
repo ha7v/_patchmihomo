@@ -84,7 +84,7 @@ static void droid_lkm_userns_selftest_skip(const char *what, const char *why)
  * the sample: a user namespace of this module's making, a uts namespace recording it as
  * owner, and a mount namespace recording it as owner (the exact condition required for may_mount)
  */
-static int droid_lkm_userns_selftest_thread(void *unused)
+static int __nocfi droid_lkm_userns_selftest_thread(void *unused)
 {
 	struct droid_lkm_userns *u;
 	int ret;

@@ -621,7 +621,7 @@ static void droid_lkm_devtmpfs_populate(void)
 	kfree(devs);
 }
 
-__nocfi noinline int droid_lkm_devtmpfs_device_add(struct device *dev)
+DROID_LKM_ENTRY __nocfi noinline int droid_lkm_devtmpfs_device_add(struct device *dev)
 {
 	int ret;
 
@@ -635,7 +635,7 @@ __nocfi noinline int droid_lkm_devtmpfs_device_add(struct device *dev)
 	return ret;
 }
 
-__nocfi noinline void droid_lkm_devtmpfs_device_del(struct device *dev)
+DROID_LKM_ENTRY __nocfi noinline void droid_lkm_devtmpfs_device_del(struct device *dev)
 {
 	if (!droid_lkm_devtmpfs_del_orig)
 		return;

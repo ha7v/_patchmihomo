@@ -179,7 +179,7 @@ static __nocfi int droid_lkm_userns_mnt_own(struct mnt_namespace *mnt_ns,
 }
 
 /* the other half of that reference */
-__nocfi noinline void droid_lkm_userns_putmntns_wrap(struct mnt_namespace *ns)
+DROID_LKM_ENTRY __nocfi noinline void droid_lkm_userns_putmntns_wrap(struct mnt_namespace *ns)
 {
 	typeof(droid_lkm_userns_putmntns_orig) orig =
 		READ_ONCE(droid_lkm_userns_putmntns_orig);
@@ -212,7 +212,7 @@ __nocfi noinline void droid_lkm_userns_putmntns_wrap(struct mnt_namespace *ns)
 	orig(ns);
 }
 
-__nocfi noinline struct mnt_namespace *
+DROID_LKM_ENTRY __nocfi noinline struct mnt_namespace *
 droid_lkm_userns_copymntns_wrap(unsigned long flags, struct mnt_namespace *ns,
 				struct user_namespace *user_ns,
 				struct fs_struct *new_fs)
@@ -245,7 +245,7 @@ droid_lkm_userns_copymntns_wrap(unsigned long flags, struct mnt_namespace *ns,
 	return new_ns;
 }
 
-__nocfi noinline struct fs_context *
+DROID_LKM_ENTRY __nocfi noinline struct fs_context *
 droid_lkm_userns_fsctx_wrap(struct file_system_type *type, unsigned int sb_flags)
 {
 	struct fs_context *fc;

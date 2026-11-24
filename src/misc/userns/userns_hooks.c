@@ -97,7 +97,7 @@ static long (*droid_lkm_userns_fchownat_orig)(const struct pt_regs *regs);
 		__orig;                                                        \
 	})
 
-__nocfi noinline struct cred *droid_lkm_userns_prepcred_wrap(void)
+DROID_LKM_ENTRY __nocfi noinline struct cred *droid_lkm_userns_prepcred_wrap(void)
 {
 	struct cred *new;
 	struct droid_lkm_userns *u;
@@ -124,7 +124,7 @@ __nocfi noinline struct cred *droid_lkm_userns_prepcred_wrap(void)
 	return new;
 }
 
-__nocfi noinline void droid_lkm_userns_putcred_wrap(struct cred *cred)
+DROID_LKM_ENTRY __nocfi noinline void droid_lkm_userns_putcred_wrap(struct cred *cred)
 {
 	struct droid_lkm_userns *u;
 	typeof(droid_lkm_userns_putcred_orig) orig = DROID_LKM_USERNS_ORIG(putcred);
@@ -143,7 +143,7 @@ __nocfi noinline void droid_lkm_userns_putcred_wrap(struct cred *cred)
 		droid_lkm_userns_put(u);
 }
 
-__nocfi noinline int droid_lkm_userns_seccap_wrap(const struct cred *cred,
+DROID_LKM_ENTRY __nocfi noinline int droid_lkm_userns_seccap_wrap(const struct cred *cred,
 						  struct user_namespace *ns,
 						  int cap, unsigned int opts)
 {
@@ -217,7 +217,7 @@ __nocfi noinline int droid_lkm_userns_seccap_wrap(const struct cred *cred,
  * capability test then fails for a task in a fake one. build them with the task's own
  * namespace as owner, through create_new_namespaces() so every constructor runs
  */
-__nocfi noinline int droid_lkm_userns_nsproxy_wrap(unsigned long unshare_flags,
+DROID_LKM_ENTRY __nocfi noinline int droid_lkm_userns_nsproxy_wrap(unsigned long unshare_flags,
 						   struct nsproxy **new_nsp,
 						   struct cred *new_cred,
 						   struct fs_struct *new_fs)
@@ -262,7 +262,7 @@ __nocfi noinline int droid_lkm_userns_nsproxy_wrap(unsigned long unshare_flags,
 	return 0;
 }
 
-__nocfi noinline int droid_lkm_userns_unshare_wrap(unsigned long flags)
+DROID_LKM_ENTRY __nocfi noinline int droid_lkm_userns_unshare_wrap(unsigned long flags)
 {
 	struct droid_lkm_userns *u;
 	const struct cred *old;
@@ -308,7 +308,7 @@ __nocfi noinline int droid_lkm_userns_unshare_wrap(unsigned long flags)
 	return 0;
 }
 
-__nocfi noinline int droid_lkm_userns_creds_wrap(struct task_struct *p,
+DROID_LKM_ENTRY __nocfi noinline int droid_lkm_userns_creds_wrap(struct task_struct *p,
 						unsigned long clone_flags)
 {
 	struct droid_lkm_userns *u;
@@ -350,7 +350,7 @@ __nocfi noinline int droid_lkm_userns_creds_wrap(struct task_struct *p,
 	return 0;
 }
 
-__nocfi noinline bool droid_lkm_userns_inodecap_wrap(DROID_LKM_IDMAP_PARAM
+DROID_LKM_ENTRY __nocfi noinline bool droid_lkm_userns_inodecap_wrap(DROID_LKM_IDMAP_PARAM
 						     const struct inode *inode,
 						     int cap)
 {
@@ -391,7 +391,7 @@ __nocfi noinline bool droid_lkm_userns_inodecap_wrap(DROID_LKM_IDMAP_PARAM
  * namespace created by host root is allowed to mount those (devtmpfs above all); a
  * confined one is not, it only gets what a user namespace may mount
  */
-__nocfi noinline bool droid_lkm_userns_mountcap_wrap(struct fs_context *fc)
+DROID_LKM_ENTRY __nocfi noinline bool droid_lkm_userns_mountcap_wrap(struct fs_context *fc)
 {
 	struct droid_lkm_userns *u;
 	typeof(droid_lkm_userns_mountcap_orig) orig = DROID_LKM_USERNS_ORIG(mountcap);
@@ -424,7 +424,7 @@ __nocfi noinline bool droid_lkm_userns_mountcap_wrap(struct fs_context *fc)
  * caller, so the entry translates the id instead, and refuses one the namespace does not
  * map with the -EINVAL make_kuid() would have returned
  */
-__nocfi noinline long droid_lkm_userns_fchownat_wrap(const struct pt_regs *regs)
+DROID_LKM_ENTRY __nocfi noinline long droid_lkm_userns_fchownat_wrap(const struct pt_regs *regs)
 {
 	typeof(droid_lkm_userns_fchownat_orig) orig = DROID_LKM_USERNS_ORIG(fchownat);
 	struct droid_lkm_userns *u;

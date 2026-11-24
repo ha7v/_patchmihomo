@@ -39,7 +39,7 @@ static atomic_t droid_lkm_userns_cap_busy = ATOMIC_INIT(0);
  * the caller address is read first, before anything else runs, and the busy flag keeps the
  * trace out of its own recursion
  */
-__nocfi noinline int droid_lkm_userns_cap_wrap(const struct cred *cred,
+DROID_LKM_ENTRY __nocfi noinline int droid_lkm_userns_cap_wrap(const struct cred *cred,
 					       struct user_namespace *targ_ns,
 					       int cap, unsigned int opts)
 {

@@ -116,6 +116,11 @@ void droid_lkm_misc_layout_init(void)
 	droid_lkm_misc_layout_trusted_flag = true;
 }
 
+void droid_lkm_misc_layout_exit(void)
+{
+	ds_compat_layout_exit();
+}
+
 void droid_lkm_misc_layout_report(void)
 {
 	ds_compat_layout_report(&droid_lkm_misc_layout);

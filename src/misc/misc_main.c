@@ -8,6 +8,7 @@
 
 #include "core.h"
 #include "hk.h"
+#include "hk_patch.h"
 #include "misc.h"
 #include "misc_layout.h"
 #include "misc_ksym.h"
@@ -26,6 +27,7 @@ static unsigned long __nocfi droid_lkm_misc_hk_resolve(const char *name)
 
 static const struct hk_cfg droid_lkm_misc_hk_cfg = {
 	.resolve = droid_lkm_misc_hk_resolve,
+	.write = hk_write_kernel,
 };
 
 static bool droid_lkm_misc_xt_enable = true;
@@ -145,6 +147,7 @@ err_proc:
 		hk_exit();
 		droid_lkm_misc_hk_up = false;
 	}
+	droid_lkm_misc_layout_exit();
 	return ret;
 }
 
@@ -161,6 +164,7 @@ static void __exit droid_lkm_misc_exit(void)
 		hk_exit();
 		droid_lkm_misc_hk_up = false;
 	}
+	droid_lkm_misc_layout_exit();
 	droid_lkm_misc_info("unloaded\n");
 }
 

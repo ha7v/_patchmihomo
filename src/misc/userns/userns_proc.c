@@ -648,7 +648,7 @@ droid_lkm_userns_proc_lookup(struct inode *dir, struct dentry *dentry,
 	return res;
 }
 
-__nocfi noinline struct dentry *
+DROID_LKM_ENTRY __nocfi noinline struct dentry *
 droid_lkm_userns_proc_tgid_lookup(struct inode *dir, struct dentry *dentry,
 				  unsigned int flags)
 {
@@ -659,7 +659,7 @@ droid_lkm_userns_proc_tgid_lookup(struct inode *dir, struct dentry *dentry,
 					    droid_lkm_userns_proc_tgid_orig);
 }
 
-__nocfi noinline struct dentry *
+DROID_LKM_ENTRY __nocfi noinline struct dentry *
 droid_lkm_userns_proc_tid_lookup(struct inode *dir, struct dentry *dentry,
 				 unsigned int flags)
 {
