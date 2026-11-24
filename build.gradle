@@ -166,6 +166,14 @@ def registerFlavorTasks = { String fl, boolean primary ->
             if (kVendor != null) {
                 from(kVendor) { into "bin/${k}" }
             }
+            def kMisc = [
+                new File(outDir.asFile, "${k}/droid_lkm_misc.ko"),
+                new File(outNativeDir.asFile, "${k}/droid_lkm_misc.ko"),
+                new File(outBothDir.asFile, "${k}/droid_lkm_misc.ko")
+            ].find { it.isFile() }
+            if (kMisc != null) {
+                from(kMisc) { into "bin/${k}" }
+            }
         }
 
         dirPermissions { unix('0755') }

@@ -161,7 +161,7 @@ install_with_conf() {
             return 1
         fi
         if [ "$rc" -ne 0 ]; then
-            if [ "$m" = "droid_lkm_vendor" ]; then
+            if [ "$m" = "droid_lkm_vendor" ] || [ "$m" = "droid_lkm_misc" ]; then
                 log "[$mode] skip optional $m.ko absent"
                 continue
             fi
@@ -174,7 +174,13 @@ install_with_conf() {
         rc=$?
         log "[$mode] insmod $m (${ko##*/bin/}) params=[$params] rc=$rc${out:+ out=$out}"
         [ -n "$out" ] && printf '%s\n' "$out"
-        [ "$rc" -eq 0 ] || return "$rc"
+        if [ "$rc" -ne 0 ]; then
+            if [ "$m" = "droid_lkm_misc" ]; then
+                log "[$mode] droid_lkm_misc failed (rc=$rc), skipped"
+                continue
+            fi
+            return "$rc"
+        fi
         loaded=$((loaded + 1))
     done
 

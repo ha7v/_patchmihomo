@@ -57,4 +57,5 @@ jobs:
           path: |
             out/${{ matrix.target.kmi }}/droid_lkm.ko
             out/${{ matrix.target.kmi }}/droid_lkm_vendor.ko
+            out/${{ matrix.target.kmi }}/droid_lkm_misc.ko
           if-no-files-found: warn
