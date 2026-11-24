@@ -1,0 +1,417 @@
+{
+  "btf_available": true,
+  "btf_fields": {
+    "ipc_namespace.ids": {
+      "offset": 0,
+      "required": false,
+      "size": 816
+    },
+    "ipc_namespace.ipc_set": {
+      "offset": 1120,
+      "required": false,
+      "size": 96
+    },
+    "ipc_namespace.ipc_sysctls": {
+      "offset": 1216,
+      "required": false,
+      "size": 8
+    },
+    "ipc_namespace.mq_mnt": {
+      "offset": 984,
+      "required": false,
+      "size": 8
+    },
+    "ipc_namespace.mq_msg_default": {
+      "offset": 1008,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.mq_msg_max": {
+      "offset": 1000,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.mq_msgsize_default": {
+      "offset": 1012,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.mq_msgsize_max": {
+      "offset": 1004,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.mq_queues_count": {
+      "offset": 992,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.mq_queues_max": {
+      "offset": 996,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.mq_set": {
+      "offset": 1016,
+      "required": false,
+      "size": 96
+    },
+    "ipc_namespace.mq_sysctls": {
+      "offset": 1112,
+      "required": false,
+      "size": 8
+    },
+    "ipc_namespace.msg_ctlmax": {
+      "offset": 836,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.msg_ctlmnb": {
+      "offset": 840,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.msg_ctlmni": {
+      "offset": 844,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.ns": {
+      "offset": 1248,
+      "required": false,
+      "size": 24
+    },
+    "ipc_namespace.sem_ctls": {
+      "offset": 816,
+      "required": false,
+      "size": 16
+    },
+    "ipc_namespace.shm_ctlall": {
+      "offset": 936,
+      "required": false,
+      "size": 8
+    },
+    "ipc_namespace.shm_ctlmax": {
+      "offset": 928,
+      "required": false,
+      "size": 8
+    },
+    "ipc_namespace.shm_ctlmni": {
+      "offset": 952,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.shm_rmid_forced": {
+      "offset": 956,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.shm_tot": {
+      "offset": 944,
+      "required": false,
+      "size": 8
+    },
+    "ipc_namespace.ucounts": {
+      "offset": 1232,
+      "required": false,
+      "size": 8
+    },
+    "ipc_namespace.used_sems": {
+      "offset": 832,
+      "required": false,
+      "size": 4
+    },
+    "ipc_namespace.user_ns": {
+      "offset": 1224,
+      "required": false,
+      "size": 8
+    },
+    "nsproxy.ipc_ns": {
+      "offset": 16,
+      "required": true,
+      "size": 8
+    },
+    "nsproxy.mnt_ns": {
+      "offset": 24,
+      "required": true,
+      "size": 8
+    },
+    "nsproxy.net_ns": {
+      "offset": 40,
+      "required": true,
+      "size": 8
+    },
+    "nsproxy.pid_ns_for_children": {
+      "offset": 32,
+      "required": true,
+      "size": 8
+    },
+    "nsproxy.uts_ns": {
+      "offset": 8,
+      "required": true,
+      "size": 8
+    },
+    "pid.level": {
+      "offset": 4,
+      "required": true,
+      "size": 4
+    },
+    "pid.numbers": {
+      "offset": 96,
+      "required": true,
+      "size": 0
+    },
+    "pid_namespace.child_reaper": {
+      "offset": 48,
+      "required": true,
+      "size": 8
+    },
+    "pid_namespace.idr": {
+      "offset": 0,
+      "required": true,
+      "size": 24
+    },
+    "pid_namespace.level": {
+      "offset": 64,
+      "required": true,
+      "size": 4
+    },
+    "pid_namespace.ns": {
+      "offset": 104,
+      "required": true,
+      "size": 24
+    },
+    "pid_namespace.parent": {
+      "offset": 72,
+      "required": true,
+      "size": 8
+    },
+    "pid_namespace.pid_allocated": {
+      "offset": 40,
+      "required": true,
+      "size": 4
+    },
+    "pid_namespace.pid_cachep": {
+      "offset": 56,
+      "required": true,
+      "size": 8
+    },
+    "pid_namespace.reboot": {
+      "offset": 96,
+      "required": true,
+      "size": 4
+    },
+    "pid_namespace.ucounts": {
+      "offset": 88,
+      "required": true,
+      "size": 8
+    },
+    "pid_namespace.user_ns": {
+      "offset": 80,
+      "required": true,
+      "size": 8
+    },
+    "seq_file.buf": {
+      "offset": 0,
+      "required": false,
+      "size": 8
+    },
+    "seq_file.count": {
+      "offset": 24,
+      "required": false,
+      "size": 8
+    },
+    "seq_file.size": {
+      "offset": 8,
+      "required": false,
+      "size": 8
+    },
+    "task_struct.comm": {
+      "offset": 2096,
+      "required": true,
+      "size": 16
+    },
+    "task_struct.cred": {
+      "offset": 2080,
+      "required": true,
+      "size": 8
+    },
+    "task_struct.flags": {
+      "offset": 68,
+      "required": true,
+      "size": 4
+    },
+    "task_struct.fs": {
+      "offset": 2136,
+      "required": true,
+      "size": 8
+    },
+    "task_struct.group_leader": {
+      "offset": 1624,
+      "required": false,
+      "size": 8
+    },
+    "task_struct.mm": {
+      "offset": 1440,
+      "required": true,
+      "size": 8
+    },
+    "task_struct.nsproxy": {
+      "offset": 2160,
+      "required": true,
+      "size": 8
+    },
+    "task_struct.pid": {
+      "offset": 1560,
+      "required": true,
+      "size": 4
+    },
+    "task_struct.real_cred": {
+      "offset": 2072,
+      "required": true,
+      "size": 8
+    },
+    "task_struct.real_parent": {
+      "offset": 1576,
+      "required": false,
+      "size": 8
+    },
+    "task_struct.se": {
+      "offset": 192,
+      "required": false,
+      "size": 320
+    },
+    "task_struct.sighand": {
+      "offset": 2176,
+      "required": true,
+      "size": 8
+    },
+    "task_struct.signal": {
+      "offset": 2168,
+      "required": true,
+      "size": 8
+    },
+    "task_struct.tasks": {
+      "offset": 1360,
+      "required": true,
+      "size": 16
+    },
+    "task_struct.tgid": {
+      "offset": 1564,
+      "required": true,
+      "size": 4
+    },
+    "task_struct.thread_pid": {
+      "offset": 1664,
+      "required": true,
+      "size": 8
+    },
+    "upid.nr": {
+      "offset": 0,
+      "required": true,
+      "size": 4
+    },
+    "upid.ns": {
+      "offset": 8,
+      "required": true,
+      "size": 8
+    }
+  },
+  "btf_missing_required": [],
+  "btf_types": {
+    "ipc_ids": 272,
+    "pid_namespace": 136,
+    "upid": 16
+  },
+  "btf_vs_loaded_drift": [],
+  "config": {
+    "CONFIG_ARM64_BTI_KERNEL": "n",
+    "CONFIG_CFI_CLANG": "y",
+    "CONFIG_CFI_PERMISSIVE": "n",
+    "CONFIG_COMPAT": "y",
+    "CONFIG_DEBUG_INFO_BTF": "y",
+    "CONFIG_DEVTMPFS": "n",
+    "CONFIG_KALLSYMS_ALL": "y",
+    "CONFIG_KPROBES": "y",
+    "CONFIG_MODULES": "y",
+    "CONFIG_PID_NS": "n",
+    "CONFIG_POSIX_MQUEUE": "n",
+    "CONFIG_SYSVIPC": "n",
+    "CONFIG_TRIM_UNUSED_KSYMS": "y",
+    "CONFIG_USER_NS": "n"
+  },
+  "critical_failures": [],
+  "euid": 0,
+  "kallsyms_addresses_visible": false,
+  "kernel_release": "6.6.118-android15-8-gb1422e39c313-abogki552867473-4k",
+  "ko_reports": [],
+  "symbols": {
+    "hook_targets": {
+      "missing": [
+        "update_ddl_hit_history"
+      ],
+      "module_only_shadows": [
+        "update_ddl_hit_history[oplus_bsp_sched_assist]"
+      ],
+      "present": 9,
+      "total": 10
+    },
+    "main_all": {
+      "missing": [
+        "__do_munmap",
+        "do_mas_munmap",
+        "free_ipcs",
+        "put_ipc_ns",
+        "copy_ipcs",
+        "register_sysctl",
+        "ipcns_operations"
+      ],
+      "module_only_shadows": [
+        "free_ipcs[droid_lkm]"
+      ],
+      "present": 94,
+      "total": 101
+    },
+    "native": {
+      "missing": [
+        "__ns_common_free",
+        "__ns_common_init",
+        "__ns_tree_add_raw",
+        "__ns_tree_remove",
+        "copy_pid_ns",
+        "ns_tree_gen_id",
+        "pid_ns_tree",
+        "put_pid_ns",
+        "register_pidns_sysctls",
+        "unregister_pidns_sysctls"
+      ],
+      "module_only_shadows": [],
+      "present": 3,
+      "total": 13
+    },
+    "required_main": {
+      "missing": [],
+      "module_only_shadows": [],
+      "present": 5,
+      "total": 5
+    },
+    "text_patch": {
+      "missing": [],
+      "module_only_shadows": [],
+      "present": 5,
+      "total": 5
+    },
+    "vendor": {
+      "missing": [
+        "ddl_sdata",
+        "update_ddl_hit_history"
+      ],
+      "module_only_shadows": [
+        "ddl_sdata[oplus_bsp_sched_assist]",
+        "update_ddl_hit_history[oplus_bsp_sched_assist]"
+      ],
+      "present": 4,
+      "total": 6
+    }
+  }
+}
