@@ -121,6 +121,7 @@ void droid_lkm_ns_neutralize(struct ns_common *ns, const struct proc_ns_operatio
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 	refcount_set(&ns->count, DROID_LKM_NS_LEAK_REFCOUNT);
 #endif
+	/* preserve existing ns_type on 6.18+; only swap callbacks to neutral ops */
 	ns->ops = ops;
 }
 

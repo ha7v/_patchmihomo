@@ -133,13 +133,23 @@ static struct kmem_cache *droid_lkm_create_pid_cachep(unsigned int level)
 
 	snprintf(name, sizeof(name), "droid_lkm_pid_%u", level + 1);
 	mutex_lock(&droid_lkm_pid_caches_mutex);
-	if (!*pkc)
-		*pkc = kmem_cache_create(name,
-					 /* struct_size_t() is 6.6 and later */
-					 sizeof(struct pid) +
-						 (level + 1) * sizeof(struct upid),
+	if (!*pkc) {
+		u32 upid_sz = droid_lkm_layout_type_ok(DROID_LKM_T_UPID) ?
+			droid_lkm_layout_type_size(DROID_LKM_T_UPID) : 0;
+		u32 numbers_off = droid_lkm_layout_ok(DROID_LKM_F_PID_NUMBERS) ?
+			droid_lkm_layout_off(DROID_LKM_F_PID_NUMBERS) : 0;
+		size_t obj_size;
+
+		if (upid_sz < sizeof(struct upid))
+			upid_sz = sizeof(struct upid);
+		obj_size = sizeof(struct pid) + (size_t)(level + 1) * upid_sz;
+		if (numbers_off &&
+		    numbers_off + (size_t)(level + 1) * upid_sz > obj_size)
+			obj_size = numbers_off + (size_t)(level + 1) * upid_sz;
+		*pkc = kmem_cache_create(name, obj_size,
 					 __alignof__(struct pid),
 					 SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT, NULL);
+	}
 	mutex_unlock(&droid_lkm_pid_caches_mutex);
 
 	return READ_ONCE(*pkc);

@@ -25,16 +25,19 @@ static void droid_native_nsproxy_work_fn(struct work_struct *work)
 {
 	struct droid_native_nsproxy_deferred *entry, *tmp;
 	struct llist_node *node = llist_del_all(&droid_native_nsproxy_deferred);
+	void (*free_fn)(struct nsproxy *ns) =
+		READ_ONCE(droid_native_kernel_free_nsproxy);
 
 	llist_for_each_entry_safe(entry, tmp, node, node) {
-		droid_native_kernel_free_nsproxy(entry->ns);
+		if (free_fn)
+			free_fn(entry->ns);
 		kfree(entry);
 	}
 }
 
 void droid_native_nsproxy_set_free(void (*free_nsproxy)(struct nsproxy *ns))
 {
-	droid_native_kernel_free_nsproxy = free_nsproxy;
+	WRITE_ONCE(droid_native_kernel_free_nsproxy, free_nsproxy);
 }
 
 int droid_native_nsproxy_init(void)
