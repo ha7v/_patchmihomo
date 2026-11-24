@@ -6,6 +6,7 @@
 #define DROID_LKM_IPC_MQUEUE_COMPAT_H
 
 #include <linux/types.h>
+#include "ds_compat.h"
 #include "ds_ksym.h"
 #include <linux/ipc_namespace.h>
 #include <linux/fs.h>
@@ -170,7 +171,7 @@ int droid_lkm_mq_simple_statfs(struct dentry *dentry, struct kstatfs *buf);
 struct dentry *droid_lkm_mq_simple_lookup(struct inode *dir,
 					  struct dentry *dentry,
 					  unsigned int flags);
-void droid_lkm_mq_kill_sb(struct super_block *sb);
+DROID_LKM_ENTRY void droid_lkm_mq_kill_sb(struct super_block *sb);
 
 int droid_lkm_mqueue_shim_init(void);
 bool droid_lkm_mqueue_ready(void);

@@ -408,6 +408,9 @@ __nocfi noinline int droid_lkm_mq_get_compat_sigevent(struct sigevent *event,
 }
 #endif
 
+static void (*droid_lkm_p_kill_litter_super)(struct super_block *sb);
+static void (*droid_lkm_p_d_genocide)(struct dentry *parent);
+
 int droid_lkm_mqueue_shim_init(void)
 {
 	int missing = 0;
@@ -485,6 +488,21 @@ int droid_lkm_mqueue_shim_init(void)
 	DROID_LKM_MQ_RESOLVE(droid_lkm_p_get_compat_sigevent,
 			     "get_compat_sigevent");
 #endif
+
+	/*
+	 * mqueue pins queue dentries under sb->s_root until mq_unlink(). tearing
+	 * down a private ipc_namespace without running d_genocide(sb->s_root)
+	 * leaves busy inodes behind and triggers BUG() in generic_shutdown_super()
+	 */
+	droid_lkm_p_kill_litter_super =
+		(typeof(droid_lkm_p_kill_litter_super))
+		droid_lkm_sym("kill_litter_super");
+	droid_lkm_p_d_genocide =
+		(typeof(droid_lkm_p_d_genocide))droid_lkm_sym("d_genocide");
+	if (!droid_lkm_p_kill_litter_super && !droid_lkm_p_d_genocide) {
+		droid_lkm_warn("mqueue shim: kill_litter_super/d_genocide not found\n");
+		missing++;
+	}
 
 	if (missing) {
 		droid_lkm_warn("mqueue shim: %d symbol(s) missing, POSIX mqueue disabled\n",
@@ -574,7 +592,18 @@ struct dentry *droid_lkm_mq_simple_lookup(struct inode *dir,
 	return NULL;
 }
 
-void droid_lkm_mq_kill_sb(struct super_block *sb)
+static __nocfi noinline void droid_lkm_mq_kill_sb_call(struct super_block *sb)
 {
+	if (droid_lkm_p_kill_litter_super) {
+		droid_lkm_p_kill_litter_super(sb);
+		return;
+	}
+	if (droid_lkm_p_d_genocide && sb->s_root)
+		droid_lkm_p_d_genocide(sb->s_root);
 	kill_anon_super(sb);
+}
+
+DROID_LKM_ENTRY void droid_lkm_mq_kill_sb(struct super_block *sb)
+{
+	droid_lkm_mq_kill_sb_call(sb);
 }
