@@ -48,13 +48,13 @@ Android GKI 内核默认关闭 `CONFIG_USER_NS=n`，导致内核在编译期将�
 - **零 trap 原生扩展点**：
   - `cred_prepare` / `cred_free` / `cred_transfer` -> BTF `security_hook_heads`（`userns_lsm.c`）
   - `/proc/<pid>` lookup -> `proc_t{g,}id_base_inode_operations.lookup` 槽位直替（`userns_proc.c`）
-  - `net` 命名空间析构 -> 内核原生 `register_pernet_subsys`（`.exit` 回调，零 hook、零热路径开销、100% 免疫 LTO 内联）
+  - `net` 命名空间生命周期 -> 内核原生 `register_pernet_subsys`（`.init`+`.exit` 配对 0 Hook、零热路径开销、100% 免疫 LTO 内联；`.exit` 写入永生非-init 哨兵 `dead_uns` 保持 `uevent_net_init/exit` 对称）
   - `mnt` nsfs 析构 -> `mntns_operations.put`（`mntns_put` 槽位直替，兜底同文件内联）
 - **高频热点（走 `ds_bhook` 单指令 4 字节 `B` 跳板，不满足时自动退回 `kprobe`）**：
   - `security_capable`、`capable_wrt_inode_uidgid`、`set_cred_ucounts`、`copy_creds`
 - **低频冷路径（`kprobe`，零热路径负担）**：
   - `mount_capable`、`unshare_nsproxy_namespaces`、`chown_common`、`inc_ucount`、`alloc_ucounts`、`ksys_unshare`
-  - namespace 属主配对：`copy_mnt_ns`/`put_mnt_ns`、`copy_utsname`/`free_uts_ns`、`copy_net_ns`（配对 `pernet_operations.exit`）、`copy_cgroup_ns`/`free_cgroup_ns`、`copy_time_ns`/`free_time_ns`、`fs_context_for_mount`
+  - namespace 属主配对：`copy_mnt_ns`/`put_mnt_ns`、`copy_utsname`/`free_uts_ns`、`copy_cgroup_ns`/`free_cgroup_ns`、`copy_time_ns`/`free_time_ns`、`fs_context_for_mount`（`net` 完全走原生 `pernet_operations` 无需 hook `copy_net_ns`）
 
 ### 3.2 F3 安装顺序不变量（严禁破坏）
 初始化必须严格满足 **「记账/防线在前，生产者最后，且受 `droid_lkm_userns_ready` 门禁保护」**：
@@ -81,7 +81,7 @@ Android GKI 内核默认关闭 `CONFIG_USER_NS=n`，导致内核在编译期将�
 | `struct ucounts::ns` | **永不持有 `&u->uns`** | — | **核心不变量**：`inc_ucount` / `alloc_ucounts` / `set_cred_ucounts` 将假 userns 一律重定向至永生的 `init_user_ns`，一次根治异步 `cleanup_net -> dec_ucount` UAF 与 `execve -> dec_rlimit_ucounts` 下溢 `WARN_ON_ONCE`。 |
 | `mnt_namespace::user_ns` | `userns_owner.c` (`copy_mnt_ns`) | `userns_owner.c` (`put_mnt_ns` + `mntns_operations.put` 双入口，`refcount_dec_not_one` + 原子 `xchg` 幂等并在 `orig()` 后 `put`) | 同时覆盖跨 TU `free_nsproxy` 与延迟关闭 `/proc/<pid>/ns/mnt` fd（防 `put_mnt_ns` 内联进 `mntns_put`）；BTF `mnt_namespace.{ns,user_ns}` 验证。 |
 | `uts_namespace::user_ns` | `userns_owner.c` (`copy_utsname`) | `userns_owner.c` (`free_uts_ns`，`orig()` 之后 `put`) | 覆盖 `unshare()` 与 `clone()`；需 BTF `uts_namespace.user_ns` + 析构符号同时就绪。 |
-| `net::user_ns` | `userns_owner.c` (`copy_net_ns`) | `userns_owner.c` (`register_pernet_subsys` 的 `.exit` 回调，原子 `xchg` 还原 `init_user_ns` 后 `put`) | 零 hook、零热路径开销、100% 免疫 LTO 内联，无需依赖 `net.passive` 或 `net->ns.count`/`net->active` 布局。 |
+| `net::user_ns` | `userns_owner.c` (`register_pernet_subsys` 的 `.init` 回调，内核 `setup_net()` 先写入 `net->user_ns` 再调用 `.init` 持引用) | `userns_owner.c` (`register_pernet_subsys` 的 `.exit` 回调，原子 `xchg` 写入永生非-init 哨兵 `dead_uns` 后 `put`) | 零 hook、零热路径开销、100% 免疫 LTO 内联；严禁在 `.exit` 改回 `init_user_ns`（否则 `cleanup_net` 逆序执行到 `uevent_net_exit` 会因 `net->user_ns == &init_user_ns` 误删未入链的 `ue_sk->list` 触发空指针 panic）。 |
 | `cgroup_namespace::user_ns` | `userns_owner.c` (`copy_cgroup_ns`) | `userns_owner.c` (`free_cgroup_ns`，`orig()` 之后 `put`) | 覆盖 `unshare()` 与 `clone()`；BTF 校验。 |
 | `time_namespace::user_ns` | `userns_owner.c` (`copy_time_ns`) | `userns_owner.c` (`free_time_ns`，`orig()` 之后 `put`) | 注意 `time_namespace.user_ns` 偏移为 `0`，须用 `_ok` 布尔判定。 |
 | `ipc_namespace::user_ns` | `src/main/ipcns/ipcns.c` (`droid_lkm_userns_hold`) | `src/main/ipcns/ipcns.c` (`ds_free_ipc_ns` 调 `droid_lkm_userns_drop`) | 通过 `droid_lkm_ns_kind_reg` 跨模块回调闭环。 |

@@ -62,13 +62,25 @@ struct time_namespace;
 
 struct user_namespace *droid_lkm_userns_init_uns;
 
+/*
+ * Immortal non-init tombstone written into net->user_ns during pernet .exit.
+ *
+ * setup_net() writes net->user_ns = user_ns BEFORE running pernet_list .init,
+ * so built-in uevent_net_init() skips list_add_tail(&ue_sk->list, ...) when
+ * net->user_ns != &init_user_ns.  During reverse-order cleanup_net(), our
+ * module pernet_ops.exit runs BEFORE uevent_net_exit().  Swapping net->user_ns
+ * to &droid_lkm_userns_dead_uns (immortal static storage, != &init_user_ns,
+ * not in droid_lkm_userns_list) keeps net->user_ns != &init_user_ns invariant
+ * across uevent_net_exit() while dropping the fake userns ref with zero UAF.
+ */
+static struct user_namespace droid_lkm_userns_dead_uns;
+
 static struct ds_hook droid_lkm_userns_copymntns_hook;
 static struct ds_hook droid_lkm_userns_fsctx_hook;
 static struct ds_hook droid_lkm_userns_putmntns_hook;
 static struct ds_hook droid_lkm_userns_mntnsput_hook;
 static struct ds_hook droid_lkm_userns_copyuts_hook;
 static struct ds_hook droid_lkm_userns_freeuts_hook;
-static struct ds_hook droid_lkm_userns_copynet_hook;
 static struct ds_hook droid_lkm_userns_copycgroup_hook;
 static struct ds_hook droid_lkm_userns_freecgroup_hook;
 static struct ds_hook droid_lkm_userns_copytime_hook;
@@ -87,9 +99,6 @@ static struct uts_namespace *(*droid_lkm_userns_copyuts_orig)(
 		unsigned long flags, struct user_namespace *user_ns,
 		struct uts_namespace *old_ns);
 static void (*droid_lkm_userns_freeuts_orig)(struct uts_namespace *ns);
-static struct net *(*droid_lkm_userns_copynet_orig)(
-		unsigned long flags, struct user_namespace *user_ns,
-		struct net *old_net);
 static struct cgroup_namespace *(*droid_lkm_userns_copycgroup_orig)(
 		unsigned long flags, struct user_namespace *user_ns,
 		struct cgroup_namespace *old_ns);
@@ -388,46 +397,54 @@ droid_lkm_userns_freeuts_wrap(struct uts_namespace *ns)
 		droid_lkm_userns_put(u);
 }
 
-DROID_LKM_ENTRY __nocfi noinline struct net *
-droid_lkm_userns_copynet_wrap(unsigned long flags,
-			      struct user_namespace *user_ns,
-			      struct net *old_net)
+static DROID_LKM_ENTRY __nocfi noinline int
+droid_lkm_userns_pernet_init(struct net *net)
 {
-	typeof(droid_lkm_userns_copynet_orig) orig =
-		READ_ONCE(droid_lkm_userns_copynet_orig);
-	struct net *new_net;
+	struct user_namespace *uns;
+	struct droid_lkm_userns *u;
 
-	if (unlikely(!orig))
-		orig = (typeof(orig))READ_ONCE(droid_lkm_userns_copynet_hook.orig);
-	if (!orig) {
-		ds_hook_leave(&droid_lkm_userns_copynet_hook);
-		return ERR_PTR(-EAGAIN);
-	}
+	if (!net || !droid_lkm_misc_netns_user_ns_ok)
+		return 0;
 
-	new_net = orig(flags, user_ns, old_net);
-	ds_hook_leave(&droid_lkm_userns_copynet_hook);
+	uns = READ_ONCE(*(struct user_namespace **)((char *)net +
+						    droid_lkm_misc_netns_user_ns_off));
+	if (likely(uns == droid_lkm_userns_init_uns))
+		return 0;
 
-	if (!IS_ERR_OR_NULL(new_net) && (flags & CLONE_NEWNET) &&
-	    droid_lkm_misc_netns_user_ns_ok)
-		droid_lkm_userns_attach_owner(
-			new_net, droid_lkm_misc_netns_user_ns_off, user_ns);
-	return new_net;
+	u = droid_lkm_userns_from_ns(uns);
+	if (!u)
+		return 0;
+
+	if (!droid_lkm_userns_get(u))
+		return -ENOMEM;
+
+	return 0;
 }
 
 static DROID_LKM_ENTRY __nocfi noinline void
 droid_lkm_userns_pernet_exit(struct net *net)
 {
+	void **field;
+	struct user_namespace *cur_uns, *old_uns;
 	struct droid_lkm_userns *u;
 
 	if (!net || !droid_lkm_misc_netns_user_ns_ok)
 		return;
 
-	u = droid_lkm_userns_detach_owner(net, droid_lkm_misc_netns_user_ns_off);
+	field = (void **)((char *)net + droid_lkm_misc_netns_user_ns_off);
+	cur_uns = READ_ONCE(*field);
+	if (likely(cur_uns == droid_lkm_userns_init_uns ||
+		   cur_uns == &droid_lkm_userns_dead_uns))
+		return;
+
+	old_uns = xchg(field, &droid_lkm_userns_dead_uns);
+	u = droid_lkm_userns_from_ns(old_uns);
 	if (u)
 		droid_lkm_userns_put(u);
 }
 
 static struct pernet_operations droid_lkm_userns_pernet_ops = {
+	.init = droid_lkm_userns_pernet_init,
 	.exit = droid_lkm_userns_pernet_exit,
 };
 
@@ -673,6 +690,14 @@ int droid_lkm_userns_owner_init(void)
 		return -ENOENT;
 	}
 
+	/* Initialize immortal non-init tombstone for net->user_ns teardown */
+	droid_lkm_userns_dead_uns.parent = droid_lkm_userns_init_uns;
+	droid_lkm_userns_dead_uns.level = 1;
+	droid_lkm_userns_dead_uns.owner = GLOBAL_ROOT_UID;
+	droid_lkm_userns_dead_uns.group = GLOBAL_ROOT_GID;
+	droid_lkm_userns_dead_uns.flags = USERNS_INIT_FLAGS;
+	refcount_set(droid_lkm_userns_ns_ref(&droid_lkm_userns_dead_uns.ns), 1);
+
 	ret = droid_lkm_userns_mnt_ops_resolve();
 	if (ret) {
 		droid_lkm_misc_warn("mntns_operations unusable: %d\n", ret);
@@ -777,27 +802,15 @@ int droid_lkm_userns_owner_init(void)
 		pos += scnprintf(ns_summary + pos, sizeof(ns_summary) - pos, " uts");
 
 	/*
-	 * Network namespace teardown uses native register_pernet_subsys()
-	 * (zero hooks, zero hot-path cost, immune to ThinLTO inlining).
+	 * Network namespace refcounting uses native register_pernet_subsys()
+	 * paired .init/.exit (zero hooks, zero hot-path cost, immune to ThinLTO
+	 * inlining, exact kernel-guaranteed 1:1 pairing even on setup_net unwind).
 	 */
 	if (droid_lkm_misc_netns_user_ns_ok &&
-	    droid_lkm_misc_sym("copy_net_ns") &&
 	    !droid_lkm_userns_pernet_register(&droid_lkm_userns_pernet_ops)) {
 		droid_lkm_userns_pernet_registered = true;
-		if (ds_hook_install_kprobe_guard(
-			    &droid_lkm_userns_copynet_hook, "copy_net_ns",
-			    "droid_lkm_userns_copynet_wrap",
-			    HK_REDIR_GUARD_CALLER)) {
-			droid_lkm_misc_warn("owner: hook copy_net_ns failed, unregistering pernet\n");
-			droid_lkm_userns_pernet_unregister(&droid_lkm_userns_pernet_ops);
-			droid_lkm_userns_pernet_registered = false;
-		} else {
-			WRITE_ONCE(droid_lkm_userns_copynet_orig,
-				   (typeof(droid_lkm_userns_copynet_orig))
-					   droid_lkm_userns_copynet_hook.orig);
-			pos += scnprintf(ns_summary + pos,
-					 sizeof(ns_summary) - pos, " net");
-		}
+		pos += scnprintf(ns_summary + pos, sizeof(ns_summary) - pos,
+				 " net");
 	}
 
 	if (droid_lkm_misc_cgroupns_user_ns_ok &&
@@ -839,8 +852,6 @@ void droid_lkm_userns_owner_exit(void)
 					(void **)&droid_lkm_userns_copycgroup_orig);
 	droid_lkm_userns_remove_ns_hook(&droid_lkm_userns_freecgroup_hook,
 					(void **)&droid_lkm_userns_freecgroup_orig);
-	droid_lkm_userns_remove_ns_hook(&droid_lkm_userns_copynet_hook,
-					(void **)&droid_lkm_userns_copynet_orig);
 	if (droid_lkm_userns_pernet_registered) {
 		droid_lkm_userns_pernet_unregister(&droid_lkm_userns_pernet_ops);
 		droid_lkm_userns_pernet_registered = false;

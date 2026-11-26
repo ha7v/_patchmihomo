@@ -1266,36 +1266,66 @@ def test_userns_object_leak_guard() -> Tuple[str, str]:
         ("USER+CGROUP", CLONE_NEWUSER | CLONE_NEWCGROUP),
         ("USER+TIME", CLONE_NEWUSER | CLONE_NEWTIME),
     ]
+    if os.geteuid() == 0:
+        combos.append(("HOST+NET", CLONE_NEWNET))
     checked: List[str] = []
 
     for label, flags in combos:
-        pid = os.fork()
-        if pid == 0:
-            try:
-                ret, err = sys_call(NR_UNSHARE, flags)
-                if ret < 0:
-                    if flags != CLONE_NEWUSER and err in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
-                        os._exit(2)
+        rounds = 3 if (flags & CLONE_NEWNET) else 1
+        skipped = False
+        for _ in range(rounds):
+            pid = os.fork()
+            if pid == 0:
+                try:
+                    ret, err = sys_call(NR_UNSHARE, flags)
+                    if ret < 0:
+                        if flags != CLONE_NEWUSER and err in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+                            os._exit(2)
+                        os._exit(1)
+                    if flags & (CLONE_NEWPID | CLONE_NEWTIME):
+                        gcpid = os.fork()
+                        if gcpid == 0:
+                            os._exit(0)
+                        os.waitpid(gcpid, 0)
+                    os._exit(0)
+                except BaseException:
                     os._exit(1)
-                if flags & (CLONE_NEWPID | CLONE_NEWTIME):
-                    gcpid = os.fork()
-                    if gcpid == 0:
-                        os._exit(0)
-                    os.waitpid(gcpid, 0)
-                os._exit(0)
-            except BaseException:
-                os._exit(1)
-        _, wstatus = os.waitpid(pid, 0)
-        rc = os.waitstatus_to_exitcode(wstatus)
-        if rc == 2:
+            _, wstatus = os.waitpid(pid, 0)
+            rc = os.waitstatus_to_exitcode(wstatus)
+            if rc == 2:
+                skipped = True
+                break
+            if rc != 0:
+                return "FAIL", f"{label} child unshare failed (rc={rc})"
+        if skipped:
             continue
-        if rc != 0:
-            return "FAIL", f"{label} child unshare failed (rc={rc})"
         after = wait_live_le(base, timeout=5.0)
         if after > base:
             return "FAIL", f"{label} leaked {after - base} userns object(s) (base={base}, live={after})"
         base = min(base, after)
         checked.append(label)
+
+    # Exercise clone(CLONE_NEWUSER | CLONE_NEWNET) path (copy_namespaces -> setup_net)
+    pid = os.fork()
+    if pid == 0:
+        try:
+            cpid, err = sys_call(NR_CLONE, CLONE_NEWUSER | CLONE_NEWNET | SIGCHLD, 0, 0, 0, 0)
+            if cpid < 0:
+                os._exit(1)
+            if cpid == 0:
+                os._exit(0)
+            os.waitpid(cpid, 0)
+            os._exit(0)
+        except BaseException:
+            os._exit(1)
+    _, wstatus = os.waitpid(pid, 0)
+    if os.waitstatus_to_exitcode(wstatus) != 0:
+        return "FAIL", "clone(CLONE_NEWUSER|CLONE_NEWNET) failed"
+    after = wait_live_le(base, timeout=5.0)
+    if after > base:
+        return "FAIL", f"clone(USER|NET) leaked {after - base} userns object(s) (base={base}, live={after})"
+    base = min(base, after)
+    checked.append("clone(USER|NET)")
 
     # Exercise delayed nsfs eviction (mntns_operations.put + netns_put -> pernet_ops.exit)
     if os.geteuid() == 0:
