@@ -1091,7 +1091,16 @@ def test_userns_state_machine() -> Tuple[str, str]:
                 if exc.errno != errno.EPERM:
                     return "FAIL", f"setgroups after gid_map unexpected errno={exc.errno}"
 
-        return "PASS", f"unshare(CLONE_NEWUSER) + one-shot uid/gid_map + monotonic setgroups ok ({ns_link})"
+        # 4. execve inside fake userns exercises set_cred_ucounts + release_task
+        #    dec_rlimit_ucounts balance (no kernel/ucount.c WARN_ON_ONCE).
+        for true_bin in ("/bin/true", "/usr/bin/true", "/system/bin/true"):
+            if os.path.exists(true_bin):
+                r = subprocess.run([true_bin], capture_output=True, timeout=5)
+                if r.returncode != 0:
+                    return "FAIL", f"execve {true_bin} inside userns failed rc={r.returncode}"
+                break
+
+        return "PASS", f"unshare(CLONE_NEWUSER) + one-shot uid/gid_map + monotonic setgroups + execve ok ({ns_link})"
 
     return run_in_child(child)
 
@@ -1117,6 +1126,8 @@ def test_bwrap_smoke() -> Tuple[str, str]:
         'printf "user=%s\\n" "$(readlink /proc/self/ns/user)"; '
         'printf "pid=%s\\n" "$(readlink /proc/self/ns/pid)"; '
         'printf "ipc=%s\\n" "$(readlink /proc/self/ns/ipc)"; '
+        'printf "sh_pid=%s\\n" "$$"; '
+        'printf "pid1_ns=%s\\n" "$(grep "^NSpid:" /proc/1/status | tr "\\t" " ")"; '
         'grep "^NSpid:" /proc/self/status'
     )
     cmd = [
@@ -1128,32 +1139,46 @@ def test_bwrap_smoke() -> Tuple[str, str]:
         "--tmpfs", "/tmp",
         "/bin/sh", "-c", inner_sh,
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-    if r.returncode != 0:
-        return "FAIL", f"bwrap --unshare-all failed (rc={r.returncode}): {(r.stderr or r.stdout).strip()}"
-
+    # Run multiple rounds so async cleanup_net -> dec_ucount workqueues execute
+    # after fake userns teardown (regression test for ucounts->ns UAF).
     kv = {}
     nspid_line = ""
-    for ln in r.stdout.splitlines():
-        s = ln.strip()
-        if s.startswith("NSpid:"):
-            nspid_line = s
-        elif "=" in s:
-            k, v = s.split("=", 1)
-            kv[k] = v
+    for rnd in range(3):
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return "FAIL", f"bwrap --unshare-all round {rnd + 1} failed (rc={r.returncode}): {(r.stderr or r.stdout).strip()}"
 
-    for k, outer in (("user", outer_user), ("pid", outer_pid), ("ipc", outer_ipc)):
-        inner = kv.get(k, "")
-        if not inner or not inner.startswith(f"{k}:["):
-            return "FAIL", f"bwrap invalid inner ns/{k}: {inner!r}"
-        if outer and inner == outer:
-            return "FAIL", f"bwrap ns/{k} not isolated (still {inner})"
+        kv = {}
+        nspid_line = ""
+        for ln in r.stdout.splitlines():
+            s = ln.strip()
+            if s.startswith("NSpid:"):
+                nspid_line = s
+            elif "=" in s:
+                k, v = s.split("=", 1)
+                kv[k] = v
 
-    toks = nspid_line.split()[1:] if nspid_line else []
-    if len(toks) < 2 or toks[-1] != "1":
-        return "FAIL", f"bwrap unexpected inner {nspid_line!r}"
+        for k, outer in (("user", outer_user), ("pid", outer_pid), ("ipc", outer_ipc)):
+            inner = kv.get(k, "")
+            if not inner or not inner.startswith(f"{k}:["):
+                return "FAIL", f"bwrap invalid inner ns/{k}: {inner!r}"
+            if outer and inner == outer:
+                return "FAIL", f"bwrap ns/{k} not isolated (still {inner})"
 
-    return "PASS", f"bwrap --unshare-all verified: {kv['user']} | {kv['pid']} | {kv['ipc']} | {nspid_line}"
+        # bwrap --proc /proc mounts a fresh procfs in the inner PID namespace, so
+        # NSpid starts at that namespace level (1 column): /proc/1/status must show
+        # NSpid 1, sh itself is PID 1 or 2, and self/status NSpid is a single inner PID.
+        pid1_toks = kv.get("pid1_ns", "").split()[1:]
+        if pid1_toks != ["1"]:
+            return "FAIL", f"bwrap unexpected /proc/1/status {kv.get('pid1_ns', '')!r}"
+        if kv.get("sh_pid", "") not in ("1", "2"):
+            return "FAIL", f"bwrap unexpected shell pid={kv.get('sh_pid', '')!r}"
+        toks = nspid_line.split()[1:] if nspid_line else []
+        if len(toks) != 1 or not toks[0].isdigit() or int(toks[0]) < 1:
+            return "FAIL", f"bwrap unexpected inner {nspid_line!r}"
+    time.sleep(0.4)
+
+    return "PASS", f"bwrap --unshare-all x3 verified: {kv['user']} | {kv['pid']} | {kv['ipc']} | sh_pid={kv['sh_pid']} {nspid_line}"
 
 
 def run_local_suite(include_bwrap: bool = False, include_stress: bool = False) -> List[TestResult]:

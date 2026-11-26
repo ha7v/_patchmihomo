@@ -183,7 +183,7 @@ DROID_LKM_ENTRY __nocfi noinline void droid_lkm_userns_putmntns_wrap(struct mnt_
 {
 	typeof(droid_lkm_userns_putmntns_orig) orig =
 		READ_ONCE(droid_lkm_userns_putmntns_orig);
-	struct droid_lkm_userns *u;
+	struct droid_lkm_userns *u = NULL;
 	u32 off = droid_lkm_misc_mntns_user_ns_off;
 
 	if (unlikely(!orig))
@@ -208,13 +208,15 @@ DROID_LKM_ENTRY __nocfi noinline void droid_lkm_userns_putmntns_wrap(struct mnt_
 
 			old_uns = xchg(field, droid_lkm_userns_init_uns);
 			u = droid_lkm_userns_from_ns(old_uns);
-			if (u)
-				droid_lkm_userns_put(u);
 		}
 	}
 
 	orig(ns);
 	ds_hook_leave(&droid_lkm_userns_putmntns_hook);
+
+	/* Drop userns reference only after orig(ns) finishes mount/ucount teardown */
+	if (u)
+		droid_lkm_userns_put(u);
 }
 
 DROID_LKM_ENTRY __nocfi noinline struct mnt_namespace *

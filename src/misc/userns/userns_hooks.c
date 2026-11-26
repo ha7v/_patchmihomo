@@ -61,6 +61,11 @@ static struct ds_hook droid_lkm_userns_seccap_hook;
 static struct ds_hook droid_lkm_userns_chown_hook;
 static struct ds_hook droid_lkm_userns_fchownat_hook;
 static struct ds_hook droid_lkm_userns_fchown_hook;
+static struct ds_hook droid_lkm_userns_incuc_hook;
+static struct ds_hook droid_lkm_userns_allocuc_hook;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+static struct ds_hook droid_lkm_userns_setcreduc_hook;
+#endif
 
 /* Fallback credential accounting hooks (used only when LSM splice is unavailable) */
 static struct ds_hook droid_lkm_userns_prepcred_hook;
@@ -90,6 +95,14 @@ static int (*droid_lkm_userns_chown_orig)(const struct path *path,
 					  uid_t user, gid_t group);
 static long (*droid_lkm_userns_fchownat_orig)(const struct pt_regs *regs);
 static long (*droid_lkm_userns_fchown_orig)(const struct pt_regs *regs);
+static struct ucounts *(*droid_lkm_userns_incuc_orig)(struct user_namespace *ns,
+						      kuid_t uid,
+						      enum ucount_type type);
+static struct ucounts *(*droid_lkm_userns_allocuc_orig)(struct user_namespace *ns,
+							kuid_t uid);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+static int (*droid_lkm_userns_setcreduc_orig)(struct cred *new);
+#endif
 
 #define DROID_LKM_USERNS_ORIG(_name)                                           \
 	({                                                                     \
@@ -660,6 +673,106 @@ droid_lkm_userns_fchown_wrap(const struct pt_regs *regs)
 	return ret;
 }
 
+/*
+ * CONFIG_USER_NS=n compiles get_user_ns() / put_user_ns() out to no-op stubs,
+ * so struct ucounts never pins a fake user_namespace alive. Redirecting every
+ * ucounts lookup/allocation for our fake userns to init_user_ns prevents:
+ *   1. Async teardown UAF (e.g. cleanup_net -> dec_ucount -> iter->ns->ucounts
+ *      dereferencing a freed droid_lkm_userns).
+ *   2. UCOUNT_RLIMIT_NPROC underflow WARNING in dec_rlimit_ucounts() when
+ *      execve -> set_cred_ucounts() allocates a fresh zero-count ucounts under
+ *      a fake userns while commit_creds() skips inc_rlimit_ucounts().
+ */
+DROID_LKM_ENTRY __nocfi noinline struct ucounts *
+droid_lkm_userns_incuc_wrap(struct user_namespace *ns, kuid_t uid,
+			    enum ucount_type type)
+{
+	typeof(droid_lkm_userns_incuc_orig) orig = DROID_LKM_USERNS_ORIG(incuc);
+	struct ucounts *ret;
+
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_userns_incuc_hook);
+		return NULL;
+	}
+
+	if (unlikely(ns && ns != droid_lkm_userns_init_uns &&
+		     droid_lkm_userns_is_ours(ns)))
+		ns = droid_lkm_userns_init_uns;
+
+	ret = orig(ns, uid, type);
+	ds_hook_leave(&droid_lkm_userns_incuc_hook);
+	return ret;
+}
+
+DROID_LKM_ENTRY __nocfi noinline struct ucounts *
+droid_lkm_userns_allocuc_wrap(struct user_namespace *ns, kuid_t uid)
+{
+	typeof(droid_lkm_userns_allocuc_orig) orig =
+		DROID_LKM_USERNS_ORIG(allocuc);
+	struct ucounts *ret;
+
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_userns_allocuc_hook);
+		return NULL;
+	}
+
+	if (unlikely(ns && ns != droid_lkm_userns_init_uns &&
+		     droid_lkm_userns_is_ours(ns)))
+		ns = droid_lkm_userns_init_uns;
+
+	ret = orig(ns, uid);
+	ds_hook_leave(&droid_lkm_userns_allocuc_hook);
+	return ret;
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+DROID_LKM_ENTRY __nocfi noinline int
+droid_lkm_userns_setcreduc_wrap(struct cred *new)
+{
+	typeof(droid_lkm_userns_setcreduc_orig) orig =
+		DROID_LKM_USERNS_ORIG(setcreduc);
+	struct user_namespace *saved_uns;
+	int ret;
+
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_userns_setcreduc_hook);
+		return 0;
+	}
+
+	if (likely(!new ||
+		   READ_ONCE(new->user_ns) == droid_lkm_userns_init_uns)) {
+		ret = orig(new);
+		ds_hook_leave(&droid_lkm_userns_setcreduc_hook);
+		return ret;
+	}
+
+	saved_uns = READ_ONCE(new->user_ns);
+	if (droid_lkm_userns_is_ours(saved_uns)) {
+		/* Fast path: execve inside fake userns with unchanged uid */
+		if (new->ucounts &&
+		    new->ucounts->ns == droid_lkm_userns_init_uns &&
+		    uid_eq(new->ucounts->uid, new->uid)) {
+			ds_hook_leave(&droid_lkm_userns_setcreduc_hook);
+			return 0;
+		}
+		/*
+		 * UID changed (e.g. setuid): temporarily point private
+		 * uncommitted cred->user_ns at init_user_ns across orig() so
+		 * ThinLTO-inlined alloc_ucounts() still resolves init_user_ns.
+		 */
+		WRITE_ONCE(new->user_ns, droid_lkm_userns_init_uns);
+		ret = orig(new);
+		WRITE_ONCE(new->user_ns, saved_uns);
+		ds_hook_leave(&droid_lkm_userns_setcreduc_hook);
+		return ret;
+	}
+
+	ret = orig(new);
+	ds_hook_leave(&droid_lkm_userns_setcreduc_hook);
+	return ret;
+}
+#endif
+
 static int droid_lkm_userns_hook_hot(struct ds_hook *h, const char *sym,
 				     const char *wrap, void **orig,
 				     enum hk_redir_guard guard)
@@ -745,6 +858,43 @@ int droid_lkm_userns_hooks_init(void)
 		(void **)&droid_lkm_userns_nsproxy_orig, HK_REDIR_GUARD_CALLER);
 	if (ret)
 		goto out_mountcap;
+
+	/*
+	 * Pin all struct ucounts allocations/increments for fake userns onto
+	 * init_user_ns so async namespace teardown (e.g. cleanup_net ->
+	 * dec_ucount) never dereferences a freed fake user_namespace and
+	 * execve -> set_cred_ucounts never underflows UCOUNT_RLIMIT_NPROC.
+	 */
+	ret = droid_lkm_userns_hook_lowfreq(
+		&droid_lkm_userns_incuc_hook, "inc_ucount",
+		"droid_lkm_userns_incuc_wrap",
+		(void **)&droid_lkm_userns_incuc_orig, HK_REDIR_GUARD_CALLER);
+	if (ret)
+		goto out_nsproxy;
+
+	if (droid_lkm_misc_sym("alloc_ucounts")) {
+		ret = droid_lkm_userns_hook_lowfreq(
+			&droid_lkm_userns_allocuc_hook, "alloc_ucounts",
+			"droid_lkm_userns_allocuc_wrap",
+			(void **)&droid_lkm_userns_allocuc_orig,
+			HK_REDIR_GUARD_CALLER);
+		if (ret)
+			goto out_incuc;
+	}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+	if (droid_lkm_misc_sym("set_cred_ucounts")) {
+		ret = droid_lkm_userns_hook_hot(
+			&droid_lkm_userns_setcreduc_hook, "set_cred_ucounts",
+			"droid_lkm_userns_setcreduc_wrap",
+			(void **)&droid_lkm_userns_setcreduc_orig,
+			HK_REDIR_GUARD_CALLER);
+		if (ret)
+			goto out_allocuc;
+	}
+#endif
+	droid_lkm_misc_report("userns ucounts", "ready",
+			      "redirected to init_user_ns");
 
 	/* Optional chown translation (F8: chown_common preferred over fchownat) */
 	if (droid_lkm_misc_sym("chown_common") &&
@@ -862,6 +1012,17 @@ out_chown:
 				(void **)&droid_lkm_userns_fchownat_orig);
 	droid_lkm_userns_unhook(&droid_lkm_userns_chown_hook,
 				(void **)&droid_lkm_userns_chown_orig);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+	droid_lkm_userns_unhook(&droid_lkm_userns_setcreduc_hook,
+				(void **)&droid_lkm_userns_setcreduc_orig);
+out_allocuc:
+#endif
+	droid_lkm_userns_unhook(&droid_lkm_userns_allocuc_hook,
+				(void **)&droid_lkm_userns_allocuc_orig);
+out_incuc:
+	droid_lkm_userns_unhook(&droid_lkm_userns_incuc_hook,
+				(void **)&droid_lkm_userns_incuc_orig);
+out_nsproxy:
 	droid_lkm_userns_unhook(&droid_lkm_userns_nsproxy_hook,
 				(void **)&droid_lkm_userns_nsproxy_orig);
 out_mountcap:
@@ -891,6 +1052,14 @@ void droid_lkm_userns_hooks_exit(void)
 				(void **)&droid_lkm_userns_fchownat_orig);
 	droid_lkm_userns_unhook(&droid_lkm_userns_chown_hook,
 				(void **)&droid_lkm_userns_chown_orig);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
+	droid_lkm_userns_unhook(&droid_lkm_userns_setcreduc_hook,
+				(void **)&droid_lkm_userns_setcreduc_orig);
+#endif
+	droid_lkm_userns_unhook(&droid_lkm_userns_allocuc_hook,
+				(void **)&droid_lkm_userns_allocuc_orig);
+	droid_lkm_userns_unhook(&droid_lkm_userns_incuc_hook,
+				(void **)&droid_lkm_userns_incuc_orig);
 	droid_lkm_userns_unhook(&droid_lkm_userns_nsproxy_hook,
 				(void **)&droid_lkm_userns_nsproxy_orig);
 	droid_lkm_userns_unhook(&droid_lkm_userns_mountcap_hook,
