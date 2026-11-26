@@ -25,11 +25,11 @@
 #include "misc.h"
 #include "misc_ksym.h"
 #include "userns.h"
-#include "hk_inline.h"
+#include "ds_hook.h"
 
 bool droid_lkm_userns_captrace_on;
 
-static struct hk_inline droid_lkm_userns_cap_hook;
+static struct ds_hook droid_lkm_userns_cap_hook;
 static int (*droid_lkm_userns_cap_orig)(const struct cred *cred,
 					struct user_namespace *targ_ns,
 					int cap, unsigned int opts);
@@ -48,15 +48,16 @@ DROID_LKM_ENTRY __nocfi noinline int droid_lkm_userns_cap_wrap(const struct cred
 		    unsigned int);
 	int ret;
 
-	/*
-	 * a call landing here between the patch and the trampoline is refused, so the window can
-	 * never become a call through a null pointer
-	 */
-	orig = droid_lkm_userns_cap_orig;
-	if (!orig)
+	orig = READ_ONCE(droid_lkm_userns_cap_orig);
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_userns_cap_hook.orig);
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_userns_cap_hook);
 		return -EPERM;
+	}
 
 	ret = orig(cred, targ_ns, cap, opts);
+	ds_hook_leave(&droid_lkm_userns_cap_hook);
 
 	if (ret && cred && cred->user_ns != droid_lkm_userns_init_uns &&
 	    !atomic_xchg(&droid_lkm_userns_cap_busy, 1)) {
@@ -88,24 +89,26 @@ int droid_lkm_userns_captrace_init(void)
 	if (!droid_lkm_userns_init_uns)
 		return -ENOENT;
 
-	ret = hk_inline_hook(&droid_lkm_userns_cap_hook, "cap_capable",
-			     "droid_lkm_userns_cap_wrap");
+	ret = ds_hook_install_guard(&droid_lkm_userns_cap_hook, "cap_capable",
+				    "droid_lkm_userns_cap_wrap",
+				    HK_REDIR_GUARD_CALLER);
 	if (ret) {
 		droid_lkm_misc_warn("cap trace: hook failed: %d\n", ret);
 		return ret;
 	}
 
-	/* orig has to be the trampoline, never the symbol */
-	droid_lkm_userns_cap_orig = (void *)droid_lkm_userns_cap_hook.orig;
-	droid_lkm_misc_info("cap trace on\n");
+	WRITE_ONCE(droid_lkm_userns_cap_orig,
+		   (typeof(droid_lkm_userns_cap_orig))droid_lkm_userns_cap_hook.orig);
+	droid_lkm_misc_info("cap trace on (%s)\n",
+			    ds_hook_route_name(droid_lkm_userns_cap_hook.route));
 	return 0;
 }
 
 void droid_lkm_userns_captrace_exit(void)
 {
-	if (!droid_lkm_userns_cap_orig)
+	if (!droid_lkm_userns_cap_hook.live)
 		return;
 
-	hk_inline_unhook(&droid_lkm_userns_cap_hook);
-	droid_lkm_userns_cap_orig = NULL;
+	ds_hook_remove(&droid_lkm_userns_cap_hook);
+	WRITE_ONCE(droid_lkm_userns_cap_orig, NULL);
 }

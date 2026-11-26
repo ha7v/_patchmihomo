@@ -163,11 +163,19 @@ static struct dentry *droid_lkm_ns_kind_lookup(struct dentry *dentry,
 static DROID_LKM_ENTRY __nocfi noinline struct dentry *droid_lkm_ns_lookup(struct inode *dir, struct dentry *dentry,
 				   unsigned int flags)
 {
+	typeof(droid_lkm_orig_ns_lookup) orig = READ_ONCE(droid_lkm_orig_ns_lookup);
 	enum droid_lkm_ns_kind kind;
 	struct task_struct *task;
 	struct dentry *res;
 
-	res = droid_lkm_orig_ns_lookup(dir, dentry, flags);
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_nsdir_hook.orig);
+	if (unlikely(!orig)) {
+		ds_hook_leave(&droid_lkm_nsdir_hook);
+		return ERR_PTR(-ENOENT);
+	}
+
+	res = orig(dir, dentry, flags);
 	ds_hook_leave(&droid_lkm_nsdir_hook);
 	if (!IS_ERR(res) || PTR_ERR(res) != -ENOENT)
 		return res;

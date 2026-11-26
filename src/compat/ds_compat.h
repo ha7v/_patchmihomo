@@ -75,6 +75,17 @@ struct ds_compat_sym {
 /* resolve one module's symbol table, a name the kernel does not carry stays 0 */
 int ds_compat_bind(const struct ds_compat_sym *tab, unsigned int count);
 
+/* private writable alias for a single-page kernel RO/ro_after_init target */
+struct ds_compat_rodata_map {
+	void *vmap_base;
+	void *writable;
+	unsigned long pfn;
+	bool owned;
+};
+
+int ds_compat_rodata_map(void *dst, size_t len, struct ds_compat_rodata_map *m);
+void ds_compat_rodata_unmap(struct ds_compat_rodata_map *m);
+
 /* one write for a pointer field, the cascade every data patch uses */
 int ds_compat_write(void *dst, unsigned long val);
 

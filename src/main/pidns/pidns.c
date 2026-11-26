@@ -3,6 +3,7 @@
  * Copyright (C) 2026 dere3046
  */
 
+#include <linux/atomic.h>
 #include <linux/pid.h>
 #include <linux/pid_namespace.h>
 #include <linux/ns_common.h>
@@ -599,6 +600,9 @@ const struct proc_ns_operations droid_lkm_pidns_for_children_ops = {
 
 int droid_lkm_pidns_reboot(struct pid_namespace *ns, int cmd)
 {
+	struct task_struct **reaper_slot;
+	struct task_struct *reaper;
+
 	switch (cmd) {
 	case LINUX_REBOOT_CMD_RESTART2:
 	case LINUX_REBOOT_CMD_RESTART:
@@ -612,13 +616,17 @@ int droid_lkm_pidns_reboot(struct pid_namespace *ns, int cmd)
 		return -EINVAL;
 	}
 
-	if (droid_lkm_pidns_child_reaper(ns)) {
-		struct task_struct *reaper = droid_lkm_pidns_child_reaper(ns);
-
+	reaper_slot = (struct task_struct **)((char *)ns +
+		droid_lkm_layout_off(DROID_LKM_F_PID_NS_CHILD_REAPER));
+	rcu_read_lock();
+	reaper = READ_ONCE(*reaper_slot);
+	if (reaper && reaper != droid_lkm_reaper_task) {
 		send_sig(SIGKILL, reaper, 1);
 		droid_lkm_info("pidns %p reboot=%d, reaper %d killed\n", ns,
-			droid_lkm_pidns_reboot_value(ns), droid_lkm_task_pid(reaper));
+			droid_lkm_pidns_reboot_value(ns),
+			droid_lkm_task_pid(reaper));
 	}
+	rcu_read_unlock();
 	return 0;
 }
 
@@ -743,6 +751,7 @@ void droid_lkm_pidns_queue_zap(struct pid_namespace *ns)
 __nocfi noinline void droid_lkm_pidns_exit_cleanup(struct task_struct *task)
 {
 	struct pid_namespace *ns = task_active_pid_ns(task);
+	struct task_struct **reaper_slot;
 
 	if (droid_lkm_task_ipc_exit_defer(task))
 		droid_lkm_reaper_wake();
@@ -750,17 +759,26 @@ __nocfi noinline void droid_lkm_pidns_exit_cleanup(struct task_struct *task)
 	if (!droid_lkm_pidns_is_ours(ns))
 		return;
 
+	reaper_slot = (struct task_struct **)((char *)ns +
+		droid_lkm_layout_off(DROID_LKM_F_PID_NS_CHILD_REAPER));
+
 	droid_lkm_dbg("exit_ns: %s[%d] ns=%p reaper=%d\n",
 	       droid_lkm_task_comm(task), droid_lkm_task_pid(task), ns,
-	       droid_lkm_pidns_child_reaper(ns) == task);
+	       READ_ONCE(*reaper_slot) == task);
 
-	if (droid_lkm_pidns_child_reaper(ns) != task)
+	if (READ_ONCE(*reaper_slot) != task)
 		return;
 
-	droid_lkm_ks.disable_pid_allocation(ns);
+	/*
+	 * Atomic claim ensures strict idempotency when both sched_process_exit
+	 * tracepoint and exit_task_namespaces fire for an exiting PID 1.
+	 */
+	if (droid_lkm_reaper_task) {
+		if (cmpxchg(reaper_slot, task, droid_lkm_reaper_task) != task)
+			return;
+	}
 
-	if (droid_lkm_reaper_task)
-		droid_lkm_pidns_set_child_reaper(ns, droid_lkm_reaper_task);
+	droid_lkm_ks.disable_pid_allocation(ns);
 
 	if (droid_lkm_pidns_reboot_value(ns))
 		droid_lkm_task_signal(task)->group_exit_code =

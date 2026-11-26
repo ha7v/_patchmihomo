@@ -635,20 +635,21 @@ def test_pid_ns_reaper_cleanup() -> Tuple[str, str]:
             os.close(r_fd)
             sleeper = os.fork()
             if sleeper == 0:
+                # Report sleeper's own host-visible PID via /proc/self/status NSpid[0]
+                # (PID 1 cannot read /proc/<sleeper> on host-mounted /proc where PID 2 is kthreadd).
+                try:
+                    st = Path("/proc/self/status").read_text(encoding="utf-8", errors="replace")
+                    nsp = next((ln for ln in st.splitlines() if ln.startswith("NSpid:")), "")
+                    host_sleeper = nsp.split()[1] if len(nsp.split()) >= 2 else ""
+                    os.write(w_fd, host_sleeper.encode("ascii"))
+                except OSError:
+                    pass
                 os.close(w_fd)
                 time.sleep(30)
                 os._exit(0)
-            # Report sleeper's host-visible PID via /proc/self/status? No, sleeper's own NSpid[0]
-            # Wait briefly so sleeper is alive, write its host PID from /proc/<sleeper>/status or just exit
-            try:
-                st = Path(f"/proc/{sleeper}/status").read_text(encoding="utf-8", errors="replace")
-                nsp = next((ln for ln in st.splitlines() if ln.startswith("NSpid:")), "")
-                host_sleeper = nsp.split()[1] if len(nsp.split()) >= 2 else ""
-                os.write(w_fd, host_sleeper.encode("ascii"))
-            except OSError:
-                pass
             os.close(w_fd)
-            # PID 1 exits immediately without killing sleeper
+            # Give sleeper a moment to report its host PID, then PID 1 exits without killing sleeper
+            time.sleep(0.05)
             os._exit(0)
 
         os.close(w_fd)

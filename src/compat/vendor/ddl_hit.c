@@ -12,9 +12,12 @@
 
 #include "core.h"
 #include "ds_compat.h"
+#include "ds_hook.h"
 #include "ddl_hit.h"
 #include "vendor_syms.h"
-#include "hk_redir.h"
+
+/* 6.18 builds with -Wmissing-prototypes */
+DROID_LKM_ENTRY __nocfi noinline void dlc_ddl_update_wrap(struct task_struct *p);
 
 struct dlc_ddl_entry {
 	char comm[TASK_COMM_LEN];
@@ -56,7 +59,7 @@ static struct ds_compat_layout dlc_ddl_layout_table = {
 
 static u32 dlc_ddl_pid_off;
 static u32 dlc_ddl_comm_off;
-static struct hk_redir dlc_ddl_hook;
+static struct ds_hook dlc_ddl_hook;
 
 static bool dlc_ddl_field_ok(u8 state)
 {
@@ -76,15 +79,12 @@ static bool dlc_ddl_layout_ready(void)
 	return true;
 }
 
-static DROID_LKM_ENTRY __nocfi noinline void dlc_ddl_update_wrap(struct task_struct *p)
+DROID_LKM_ENTRY __nocfi noinline void dlc_ddl_update_wrap(struct task_struct *p)
 {
 	struct dlc_ddl_entry *entry;
 	void *base = dlc_vendor_syms.ddl_sdata;
 	char comm[TASK_COMM_LEN];
 	pid_t pid;
-
-	if (dlc_ddl_hook.how == HK_REDIR_KPROBE)
-		hk_redir_leave(&dlc_ddl_hook);
 
 	if (!p || !base)
 		return;
@@ -106,7 +106,6 @@ static DROID_LKM_ENTRY __nocfi noinline void dlc_ddl_update_wrap(struct task_str
 
 int dlc_ddl_hit_init(void)
 {
-	struct hk_inline_probe probe;
 	int ret;
 
 	if (!dlc_vendor_syms.ddl_sdata || !dlc_vendor_syms.ddl_update)
@@ -117,35 +116,21 @@ int dlc_ddl_hit_init(void)
 		return 0;
 	}
 
-	if (!hk_inline_probe("update_ddl_hit_history", &probe) &&
-	    probe.state != HK_INLINE_PLAIN)
-		pr_warn("[W] [droid_lkm_vendor] ddl: entry state %d (%s), text route skipped\n",
-			probe.state, probe.reason ? probe.reason : "?");
-	else {
-		memset(&dlc_ddl_hook, 0, sizeof(dlc_ddl_hook));
-		dlc_ddl_hook.ret_mode = HK_INLINE_RET_X17;
-		ret = hk_redir_install(&dlc_ddl_hook, "update_ddl_hit_history",
-				       "dlc_ddl_update_wrap", HK_REDIR_TEXT);
-		if (!ret) {
-			pr_info("[I] [droid_lkm_vendor] ddl: update_ddl_hit_history on the text route\n");
-			return 0;
-		}
-		pr_warn("[W] [droid_lkm_vendor] ddl: text route refused %d, trying kprobe\n",
-			ret);
-	}
-
-	memset(&dlc_ddl_hook, 0, sizeof(dlc_ddl_hook));
-	dlc_ddl_hook.adjust = hk_kprobe_adjust_pad;
-	ret = hk_redir_install_at(&dlc_ddl_hook,
-				  (unsigned long)dlc_vendor_syms.ddl_update,
-				  (unsigned long)dlc_ddl_update_wrap,
-				  HK_REDIR_KPROBE);
+	/*
+	 * Hot-path single-instruction B hook first; kprobe fallback uses
+	 * HK_REDIR_GUARD_CALLER so scheduler/atomic callers never touch
+	 * GUARD_TASK's non-irqsafe xarray lock.
+	 */
+	ret = ds_hook_install_guard(&dlc_ddl_hook, "update_ddl_hit_history",
+				    "dlc_ddl_update_wrap",
+				    HK_REDIR_GUARD_CALLER);
 	if (ret) {
 		pr_warn("[W] [droid_lkm_vendor] ddl: no route took update_ddl_hit_history (%d)\n",
 			ret);
 		return 0;
 	}
-	pr_info("[I] [droid_lkm_vendor] ddl: update_ddl_hit_history on the kprobe route\n");
+	pr_info("[I] [droid_lkm_vendor] ddl: update_ddl_hit_history on the %s route\n",
+		ds_hook_route_name(dlc_ddl_hook.route));
 	return 0;
 }
 
@@ -154,6 +139,5 @@ void dlc_ddl_hit_exit(void)
 	if (!dlc_ddl_hook.live)
 		return;
 
-	hk_redir_remove(&dlc_ddl_hook);
-	dlc_ddl_hook.live = false;
+	ds_hook_remove(&dlc_ddl_hook);
 }

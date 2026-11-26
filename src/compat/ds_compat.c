@@ -4,9 +4,14 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/printk.h>
 #include <linux/string.h>
+#include <linux/uaccess.h>
+#include <linux/vmalloc.h>
+#include <asm/barrier.h>
+#include <asm/pgtable.h>
 
 #include "core.h"
 #include "btf.h"
@@ -114,21 +119,148 @@ int ds_compat_bind(const struct ds_compat_sym *tab, unsigned int count)
 	return missing;
 }
 
+static typeof(&vmap) ds_compat_vmap_fn;
+static typeof(&vunmap) ds_compat_vunmap_fn;
+static long (*ds_compat_nofault_write_fn)(void *dst, const void *src,
+					  size_t size);
+static bool ds_compat_rodata_probed;
+
+static void ds_compat_rodata_resolve(void)
+{
+	if (ds_compat_rodata_probed)
+		return;
+	ds_compat_vmap_fn = (typeof(&vmap))ds_compat_sym("vmap");
+	ds_compat_vunmap_fn = (typeof(&vunmap))ds_compat_sym("vunmap");
+	ds_compat_nofault_write_fn =
+		(typeof(ds_compat_nofault_write_fn))ds_compat_sym(
+			"copy_to_kernel_nofault");
+	ds_compat_rodata_probed = true;
+}
+
+static __nocfi noinline void *ds_compat_call_vmap(struct page **pages,
+						  unsigned int count,
+						  unsigned long flags,
+						  pgprot_t prot)
+{
+	if (!ds_compat_vmap_fn)
+		return NULL;
+	return ds_compat_vmap_fn(pages, count, flags, prot);
+}
+
+static __nocfi noinline void ds_compat_call_vunmap(const void *addr)
+{
+	if (ds_compat_vunmap_fn && addr)
+		ds_compat_vunmap_fn(addr);
+}
+
+static __nocfi noinline long ds_compat_call_nofault_write(void *dst,
+							  const void *src,
+							  size_t size)
+{
+	if (!ds_compat_nofault_write_fn)
+		return -EOPNOTSUPP;
+	return ds_compat_nofault_write_fn(dst, src, size);
+}
+
+int ds_compat_rodata_map(void *dst, size_t len, struct ds_compat_rodata_map *m)
+{
+	unsigned long va, pa, pfn, off;
+	struct page *page;
+	void *base;
+
+	if (!dst || !m || !len || len > PAGE_SIZE)
+		return -EINVAL;
+	memset(m, 0, sizeof(*m));
+
+	va = (unsigned long)dst;
+	off = va & ~PAGE_MASK;
+	if (off + len > PAGE_SIZE)
+		return -EINVAL;
+
+	pa = hk_va_walk_pa(va);
+	if (!pa)
+		pa = hk_va_to_pa(va);
+	if (!pa)
+		return -ENOENT;
+	pfn = pa >> PAGE_SHIFT;
+
+	if (hk_va_writable(va)) {
+		m->writable = dst;
+		m->pfn = pfn;
+		m->owned = false;
+		return 0;
+	}
+
+	if (!pfn_valid(pfn))
+		return -EFAULT;
+
+	ds_compat_rodata_resolve();
+	if (!ds_compat_vmap_fn || !ds_compat_vunmap_fn)
+		return -ENOENT;
+
+	page = pfn_to_page(pfn);
+	base = ds_compat_call_vmap(&page, 1, VM_MAP, PAGE_KERNEL);
+	if (!base)
+		return -ENOMEM;
+
+	m->vmap_base = base;
+	m->writable = (char *)base + off;
+	m->pfn = pfn;
+	m->owned = true;
+	return 0;
+}
+
+void ds_compat_rodata_unmap(struct ds_compat_rodata_map *m)
+{
+	if (!m)
+		return;
+	if (m->owned && m->vmap_base)
+		ds_compat_call_vunmap(m->vmap_base);
+	memset(m, 0, sizeof(*m));
+}
+
 int ds_compat_write(void *dst, unsigned long val)
 {
 	/*
-	 * one entry for data writes: the kernel fixmap slot first then the library
-	 * slot and the caller hears about it when neither lands
+	 * Private vmap writable alias first: avoids racing the kernel's
+	 * FIX_TEXT_POKE0 slot (which is serialized by unexported patch_lock)
+	 * and performs a single 64-bit atomic store on aligned pointers.
+	 * Falls back to HooKern's private FIX_BTMAP_END library slot.
 	 */
-	struct hk_write w = { .nofault = true, .verify = true };
-	int ret;
+	struct hk_write w = {
+		.slot = HK_SLOT_LIBRARY,
+		.nofault = true,
+		.verify = true,
+	};
 
-	w.slot = HK_SLOT_KERNEL;
-	ret = hk_write_run(dst, &val, sizeof(val), &w);
-	if (!ret)
-		return 0;
+	if (!dst)
+		return -EINVAL;
 
-	w.slot = HK_SLOT_LIBRARY;
+	if (IS_ALIGNED((unsigned long)dst, sizeof(val))) {
+		struct ds_compat_rodata_map m;
+		int ret;
+
+		ret = ds_compat_rodata_map(dst, sizeof(val), &m);
+		if (!ret) {
+			long wret;
+
+			ds_compat_rodata_resolve();
+			if (ds_compat_nofault_write_fn)
+				wret = ds_compat_call_nofault_write(
+					m.writable, &val, sizeof(val));
+			else {
+				WRITE_ONCE(*(unsigned long *)m.writable, val);
+				wret = 0;
+			}
+			dsb(ish);
+			if (!wret && READ_ONCE(*(unsigned long *)dst) == val) {
+				ds_compat_rodata_unmap(&m);
+				return 0;
+			}
+			ds_compat_rodata_unmap(&m);
+		}
+	}
+
 	return hk_write_run(dst, &val, sizeof(val), &w);
 }
 

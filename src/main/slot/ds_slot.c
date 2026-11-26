@@ -12,6 +12,8 @@
 #include <linux/fs.h>
 #include <linux/pid_namespace.h>
 #include <linux/rcupdate.h>
+#include <linux/srcu.h>
+#include <linux/tracepoint.h>
 #include <linux/reboot.h>
 #include <linux/string.h>
 #include <asm/ptrace.h>
@@ -546,6 +548,87 @@ static void (*droid_lkm_exit_ns_orig)(struct task_struct *p);
 static void (*droid_lkm_free_nsproxy_orig)(struct nsproxy *ns);
 static void (*droid_lkm_do_exit_orig)(long code);
 
+/*
+ * Preferred exit cleanup path: native sched_process_exit tracepoint (runs
+ * after exit_mm() and before exit_task_namespaces(), zero text patch/kprobe).
+ * Resolved dynamically to avoid hard ksymtab dependencies on trimmed GKI.
+ */
+static struct tracepoint *droid_lkm_exit_tp;
+static typeof(&tracepoint_probe_register) droid_lkm_tp_reg_fn;
+static typeof(&tracepoint_probe_unregister) droid_lkm_tp_unreg_fn;
+static typeof(&synchronize_srcu) droid_lkm_sync_srcu_fn;
+static struct srcu_struct *droid_lkm_tp_srcu;
+static bool droid_lkm_exit_tp_live;
+
+static __nocfi noinline int droid_lkm_tp_register(struct tracepoint *tp,
+						  void *probe, void *data)
+{
+	if (!droid_lkm_tp_reg_fn)
+		return -ENOENT;
+	return droid_lkm_tp_reg_fn(tp, probe, data);
+}
+
+static __nocfi noinline int droid_lkm_tp_unregister(struct tracepoint *tp,
+						    void *probe, void *data)
+{
+	if (!droid_lkm_tp_unreg_fn)
+		return -ENOENT;
+	return droid_lkm_tp_unreg_fn(tp, probe, data);
+}
+
+static __nocfi noinline void droid_lkm_tp_sync(void)
+{
+	if (droid_lkm_sync_srcu_fn && droid_lkm_tp_srcu)
+		droid_lkm_sync_srcu_fn(droid_lkm_tp_srcu);
+	synchronize_rcu();
+}
+
+static DROID_LKM_ENTRY __nocfi noinline void
+droid_lkm_sched_process_exit_tp(void *data, struct task_struct *p)
+{
+	(void)data;
+	droid_lkm_pidns_exit_cleanup(p);
+}
+
+static int droid_lkm_exit_tp_install(void)
+{
+	int ret;
+
+	droid_lkm_exit_tp = (struct tracepoint *)droid_lkm_sym(
+		"__tracepoint_sched_process_exit");
+	droid_lkm_tp_reg_fn = (typeof(&tracepoint_probe_register))droid_lkm_sym(
+		"tracepoint_probe_register");
+	droid_lkm_tp_unreg_fn =
+		(typeof(&tracepoint_probe_unregister))droid_lkm_sym(
+			"tracepoint_probe_unregister");
+	droid_lkm_sync_srcu_fn = (typeof(&synchronize_srcu))droid_lkm_sym(
+		"synchronize_srcu");
+	droid_lkm_tp_srcu =
+		(struct srcu_struct *)droid_lkm_sym("tracepoint_srcu");
+
+	if (!droid_lkm_exit_tp || !droid_lkm_tp_reg_fn || !droid_lkm_tp_unreg_fn)
+		return -ENOENT;
+
+	ret = droid_lkm_tp_register(droid_lkm_exit_tp,
+				    droid_lkm_sched_process_exit_tp, NULL);
+	if (ret)
+		return ret;
+
+	droid_lkm_exit_tp_live = true;
+	droid_lkm_info("exit cleanup on sched_process_exit tracepoint\n");
+	return 0;
+}
+
+static void droid_lkm_exit_tp_remove(void)
+{
+	if (!droid_lkm_exit_tp_live)
+		return;
+	(void)droid_lkm_tp_unregister(droid_lkm_exit_tp,
+				      droid_lkm_sched_process_exit_tp, NULL);
+	droid_lkm_tp_sync();
+	droid_lkm_exit_tp_live = false;
+}
+
 static void droid_lkm_nsproxy_hold(struct nsproxy *nsp)
 {
 	if (!nsp || !droid_lkm_nsproxy_ipc_ns(nsp) ||
@@ -599,39 +682,54 @@ static __nocfi noinline void droid_lkm_nsproxy_switch_run(struct task_struct *p,
 DROID_LKM_ENTRY __nocfi noinline void droid_lkm_switch_wrap(struct task_struct *p,
 						  struct nsproxy *new)
 {
-	droid_lkm_nsproxy_switch_run(p, new, droid_lkm_switch_orig);
+	typeof(droid_lkm_switch_orig) orig = READ_ONCE(droid_lkm_switch_orig);
+
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_switch_hook.orig);
+	if (likely(orig))
+		droid_lkm_nsproxy_switch_run(p, new, orig);
 	ds_hook_leave(&droid_lkm_switch_hook);
 }
 
 DROID_LKM_ENTRY __nocfi noinline void droid_lkm_exit_ns_wrap(struct task_struct *p)
 {
+	typeof(droid_lkm_exit_ns_orig) orig = READ_ONCE(droid_lkm_exit_ns_orig);
 	struct nsproxy *old = droid_lkm_task_nsproxy(p);
 	struct ipc_namespace *ipc = NULL;
 	bool last = droid_lkm_nsproxy_last(old);
 
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_exit_ns_hook.orig);
 	if (last)
 		ipc = droid_lkm_nsproxy_ipc_ns(old);
 	droid_lkm_pidns_exit_cleanup(p);
-	droid_lkm_exit_ns_orig(p);
+	if (likely(orig))
+		orig(p);
 	ds_hook_leave(&droid_lkm_exit_ns_hook);
 	if (last)
 		droid_lkm_nsproxy_drop(ipc);
 }
 
 /*
- * a kernel that inlines exit_task_namespaces() into do_exit() never reaches the
- * hook above, which is what 5.15 does: the fake namespace then keeps the dying
- * task as its child_reaper and do_exit walks into the zap stub. do_exit itself
- * is never inlined, so the cleanup is repeated here.
+ * Fallback when sched_process_exit tracepoint is unavailable: a kernel that
+ * inlines exit_task_namespaces() into do_exit() (e.g. 5.15) still runs cleanup.
  */
 DROID_LKM_ENTRY __nocfi noinline void droid_lkm_do_exit_wrap(long code)
 {
+	typeof(droid_lkm_do_exit_orig) orig = READ_ONCE(droid_lkm_do_exit_orig);
+
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_do_exit_hook.orig);
 	droid_lkm_pidns_exit_cleanup(current);
-	droid_lkm_do_exit_orig(code);
+	if (likely(orig))
+		orig(code);
 }
 
 DROID_LKM_ENTRY __nocfi noinline void droid_lkm_free_nsproxy_wrap(struct nsproxy *ns)
 {
+	typeof(droid_lkm_free_nsproxy_orig) orig =
+		READ_ONCE(droid_lkm_free_nsproxy_orig);
+
 #ifdef DROID_LKM_NATIVE_PID
 	if (droid_lkm_pidns_nsproxy_enabled()) {
 		droid_native_nsproxy_defer_free(ns);
@@ -639,7 +737,10 @@ DROID_LKM_ENTRY __nocfi noinline void droid_lkm_free_nsproxy_wrap(struct nsproxy
 		return;
 	}
 #endif
-	droid_lkm_free_nsproxy_orig(ns);
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_free_nsproxy_hook.orig);
+	if (likely(orig))
+		orig(ns);
 	ds_hook_leave(&droid_lkm_free_nsproxy_hook);
 }
 
@@ -675,54 +776,71 @@ static int droid_lkm_nsproxy_release_hooks_install(void)
 {
 	int ret;
 
-	ret = ds_hook_install(&droid_lkm_switch_hook, "switch_task_namespaces",
-			      "droid_lkm_switch_wrap");
+	/* Low-frequency: kprobe + GUARD_CALLER (module callers bypass naturally) */
+	ret = ds_hook_install_kprobe_guard(&droid_lkm_switch_hook,
+					   "switch_task_namespaces",
+					   "droid_lkm_switch_wrap",
+					   HK_REDIR_GUARD_CALLER);
 	if (ret)
 		return ret;
-	droid_lkm_switch_orig =
-		(typeof(droid_lkm_switch_orig))droid_lkm_switch_hook.orig;
+	WRITE_ONCE(droid_lkm_switch_orig,
+		   (typeof(droid_lkm_switch_orig))droid_lkm_switch_hook.orig);
 
-	ret = ds_hook_install(&droid_lkm_exit_ns_hook, "exit_task_namespaces",
-			      "droid_lkm_exit_ns_wrap");
-	if (ret) {
-		ds_hook_remove(&droid_lkm_switch_hook);
-		droid_lkm_switch_orig = NULL;
-		return ret;
-	}
-	droid_lkm_exit_ns_orig =
-		(typeof(droid_lkm_exit_ns_orig))droid_lkm_exit_ns_hook.orig;
-
-	/*
-	 * not critical: a kernel that calls exit_task_namespaces() still gets the
-	 * cleanup from the hook above, this one only covers the inlined case
-	 */
-	ret = ds_hook_install_guard(&droid_lkm_do_exit_hook, "do_exit",
-				    "droid_lkm_do_exit_wrap",
+	/* Hot-path: single-instruction B hook first, kprobe CALLER fallback */
+	ret = ds_hook_install_guard(&droid_lkm_exit_ns_hook,
+				    "exit_task_namespaces",
+				    "droid_lkm_exit_ns_wrap",
 				    HK_REDIR_GUARD_CALLER);
 	if (ret) {
-		droid_lkm_warn("do_exit hook failed: %d, cleanup stays on "
-			       "exit_task_namespaces only\n", ret);
-	} else {
-		droid_lkm_do_exit_orig =
-			(typeof(droid_lkm_do_exit_orig))droid_lkm_do_exit_hook.orig;
+		ds_hook_remove(&droid_lkm_switch_hook);
+		WRITE_ONCE(droid_lkm_switch_orig, NULL);
+		return ret;
+	}
+	WRITE_ONCE(droid_lkm_exit_ns_orig,
+		   (typeof(droid_lkm_exit_ns_orig))droid_lkm_exit_ns_hook.orig);
+
+	/*
+	 * Prefer sched_process_exit tracepoint over hooking do_exit; fall back
+	 * to do_exit kprobe only if the tracepoint cannot be registered.
+	 */
+	ret = droid_lkm_exit_tp_install();
+	if (ret) {
+		droid_lkm_info("sched_process_exit tracepoint unavailable (%d), trying do_exit fallback\n",
+			       ret);
+		ret = ds_hook_install_kprobe_guard(&droid_lkm_do_exit_hook,
+						   "do_exit",
+						   "droid_lkm_do_exit_wrap",
+						   HK_REDIR_GUARD_CALLER);
+		if (ret) {
+			droid_lkm_warn("do_exit hook failed: %d, cleanup stays on exit_task_namespaces only\n",
+				       ret);
+		} else {
+			WRITE_ONCE(droid_lkm_do_exit_orig,
+				   (typeof(droid_lkm_do_exit_orig))
+					   droid_lkm_do_exit_hook.orig);
+		}
 	}
 
 	if (droid_lkm_pidns_nsproxy_enabled()) {
-		ret = ds_hook_install(&droid_lkm_free_nsproxy_hook, "free_nsproxy",
-				      "droid_lkm_free_nsproxy_wrap");
+		ret = ds_hook_install_kprobe_guard(&droid_lkm_free_nsproxy_hook,
+						   "free_nsproxy",
+						   "droid_lkm_free_nsproxy_wrap",
+						   HK_REDIR_GUARD_CALLER);
 		if (ret) {
+			droid_lkm_exit_tp_remove();
 			if (droid_lkm_do_exit_hook.live) {
 				ds_hook_remove(&droid_lkm_do_exit_hook);
-				droid_lkm_do_exit_orig = NULL;
+				WRITE_ONCE(droid_lkm_do_exit_orig, NULL);
 			}
 			ds_hook_remove(&droid_lkm_exit_ns_hook);
-			droid_lkm_exit_ns_orig = NULL;
+			WRITE_ONCE(droid_lkm_exit_ns_orig, NULL);
 			ds_hook_remove(&droid_lkm_switch_hook);
-			droid_lkm_switch_orig = NULL;
+			WRITE_ONCE(droid_lkm_switch_orig, NULL);
 			return ret;
 		}
-		droid_lkm_free_nsproxy_orig =
-			(typeof(droid_lkm_free_nsproxy_orig))droid_lkm_free_nsproxy_hook.orig;
+		WRITE_ONCE(droid_lkm_free_nsproxy_orig,
+			   (typeof(droid_lkm_free_nsproxy_orig))
+				   droid_lkm_free_nsproxy_hook.orig);
 #ifdef DROID_LKM_NATIVE_PID
 		droid_native_nsproxy_set_free(droid_lkm_free_nsproxy_call);
 #endif
@@ -735,8 +853,12 @@ static __nocfi noinline struct nsproxy *droid_lkm_cnn_call(unsigned long flags,
 					   struct user_namespace *user_ns,
 					   struct fs_struct *fs)
 {
-	struct nsproxy *nsp = droid_lkm_cnn_orig(flags, tsk, user_ns, fs);
+	typeof(droid_lkm_cnn_orig) orig = READ_ONCE(droid_lkm_cnn_orig);
+	struct nsproxy *nsp;
 
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_cnn_hook.orig);
+	nsp = orig ? orig(flags, tsk, user_ns, fs) : ERR_PTR(-ENOSYS);
 	ds_hook_leave(&droid_lkm_cnn_hook);
 	return nsp;
 }
@@ -838,8 +960,12 @@ static bool droid_lkm_cn_hooked;
 static __nocfi noinline int droid_lkm_cn_call(unsigned long flags,
 				      struct task_struct *tsk)
 {
-	int ret = droid_lkm_cn_orig(flags, tsk);
+	typeof(droid_lkm_cn_orig) orig = READ_ONCE(droid_lkm_cn_orig);
+	int ret;
 
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_cn_hook.orig);
+	ret = orig ? orig(flags, tsk) : -ENOSYS;
 	ds_hook_leave(&droid_lkm_cn_hook);
 	return ret;
 }
@@ -1123,16 +1249,18 @@ static int droid_lkm_nsproxy_hook_install(void)
 		droid_lkm_check_unshare_flags_fn = NULL;
 	}
 
-	ret = ds_hook_install_critical(&droid_lkm_cnn_hook,
-					"create_new_namespaces",
-					"droid_lkm_cnn_wrap");
+	ret = ds_hook_install_critical_kprobe_guard(&droid_lkm_cnn_hook,
+						    "create_new_namespaces",
+						    "droid_lkm_cnn_wrap",
+						    HK_REDIR_GUARD_CALLER);
 	if (ret) {
 		droid_lkm_warn("nsproxy hook unavailable (%d): clone/clone3 CLONE_NEWPID|NEWIPC stay EINVAL, unshare uses the legacy path\n",
 			ret);
 		return ret;
 	}
 
-	droid_lkm_cnn_orig = (typeof(droid_lkm_cnn_orig))droid_lkm_cnn_hook.orig;
+	WRITE_ONCE(droid_lkm_cnn_orig,
+		   (typeof(droid_lkm_cnn_orig))droid_lkm_cnn_hook.orig);
 	droid_lkm_cnn_hooked = true;
 	droid_lkm_info("nsproxy hook: create_new_namespaces 0x%016lx wrapped (orig=0x%016lx check_unshare_flags=0x%lx)\n",
 		droid_lkm_cnn_hook.addr, droid_lkm_cnn_hook.orig,
@@ -1397,16 +1525,18 @@ static int droid_lkm_clone_slot_install(void)
 
 static int droid_lkm_copy_namespaces_hook_install(void)
 {
-	int ret = ds_hook_install_critical(&droid_lkm_cn_hook,
-					   "copy_namespaces",
-					   "droid_lkm_cn_wrap");
+	int ret = ds_hook_install_critical_guard(&droid_lkm_cn_hook,
+						 "copy_namespaces",
+						 "droid_lkm_cn_wrap",
+						 HK_REDIR_GUARD_CALLER);
 
 	if (ret) {
 		droid_lkm_warn("copy_namespaces hook unavailable (%d)\n", ret);
 		return ret;
 	}
 
-	droid_lkm_cn_orig = (typeof(droid_lkm_cn_orig))droid_lkm_cn_hook.orig;
+	WRITE_ONCE(droid_lkm_cn_orig,
+		   (typeof(droid_lkm_cn_orig))droid_lkm_cn_hook.orig);
 	droid_lkm_cn_hooked = true;
 	droid_lkm_info("ns hook: copy_namespaces 0x%016lx wrapped (orig=0x%016lx)\n",
 		droid_lkm_cn_hook.addr, droid_lkm_cn_hook.orig);
@@ -1516,9 +1646,10 @@ void droid_lkm_slot_exit(void)
 #endif
 		WRITE_ONCE(droid_lkm_free_nsproxy_orig, NULL);
 	}
+	droid_lkm_exit_tp_remove();
 	if (droid_lkm_do_exit_hook.live) {
 		ds_hook_remove(&droid_lkm_do_exit_hook);
-		droid_lkm_do_exit_orig = NULL;
+		WRITE_ONCE(droid_lkm_do_exit_orig, NULL);
 	}
 	if (droid_lkm_exit_ns_hook.live) {
 		ds_hook_remove(&droid_lkm_exit_ns_hook);

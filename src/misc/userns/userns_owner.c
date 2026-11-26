@@ -49,7 +49,7 @@
 #include "misc_ksym.h"
 #include "misc_proc.h"
 #include "userns.h"
-#include "hk_inline.h"
+#include "ds_hook.h"
 /* how far above the text base a resolved callback is allowed to sit */
 #define DROID_LKM_USERNS_TEXT_WIN (64UL << 20)
 
@@ -57,9 +57,9 @@ typedef struct user_namespace *(*droid_lkm_userns_owner_t)(struct ns_common *ns)
 
 struct user_namespace *droid_lkm_userns_init_uns;
 
-static struct hk_inline droid_lkm_userns_copymntns_hook;
-static struct hk_inline droid_lkm_userns_fsctx_hook;
-static struct hk_inline droid_lkm_userns_putmntns_hook;
+static struct ds_hook droid_lkm_userns_copymntns_hook;
+static struct ds_hook droid_lkm_userns_fsctx_hook;
+static struct ds_hook droid_lkm_userns_putmntns_hook;
 static struct mnt_namespace *(*droid_lkm_userns_copymntns_orig)(
 		unsigned long flags, struct mnt_namespace *ns,
 		struct user_namespace *user_ns, struct fs_struct *new_fs);
@@ -187,16 +187,20 @@ DROID_LKM_ENTRY __nocfi noinline void droid_lkm_userns_putmntns_wrap(struct mnt_
 	u32 off = droid_lkm_misc_mntns_user_ns_off;
 
 	if (unlikely(!orig))
-		orig = (typeof(orig))droid_lkm_userns_putmntns_hook.orig;
-	if (!orig)
+		orig = (typeof(orig))READ_ONCE(droid_lkm_userns_putmntns_hook.orig);
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_userns_putmntns_hook);
 		return;
+	}
 
 	if (ns) {
 		struct ns_common *ns_common = (struct ns_common *)ns;
 		refcount_t *ref = droid_lkm_userns_ns_ref(ns_common);
 
-		if (refcount_dec_not_one(ref))
+		if (refcount_dec_not_one(ref)) {
+			ds_hook_leave(&droid_lkm_userns_putmntns_hook);
 			return;
+		}
 
 		if (off && ns_common->ops == droid_lkm_userns_mnt_ops) {
 			void **field = (void **)((char *)ns + off);
@@ -210,6 +214,7 @@ DROID_LKM_ENTRY __nocfi noinline void droid_lkm_userns_putmntns_wrap(struct mnt_
 	}
 
 	orig(ns);
+	ds_hook_leave(&droid_lkm_userns_putmntns_hook);
 }
 
 DROID_LKM_ENTRY __nocfi noinline struct mnt_namespace *
@@ -223,11 +228,14 @@ droid_lkm_userns_copymntns_wrap(unsigned long flags, struct mnt_namespace *ns,
 		READ_ONCE(droid_lkm_userns_copymntns_orig);
 
 	if (unlikely(!orig))
-		orig = (typeof(orig))droid_lkm_userns_copymntns_hook.orig;
-	if (!orig)
+		orig = (typeof(orig))READ_ONCE(droid_lkm_userns_copymntns_hook.orig);
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_userns_copymntns_hook);
 		return ERR_PTR(-EAGAIN);
+	}
 
 	new_ns = orig(flags, ns, user_ns, new_fs);
+	ds_hook_leave(&droid_lkm_userns_copymntns_hook);
 
 	if (IS_ERR(new_ns) || !(flags & CLONE_NEWNS))
 		return new_ns;
@@ -254,11 +262,14 @@ droid_lkm_userns_fsctx_wrap(struct file_system_type *type, unsigned int sb_flags
 		READ_ONCE(droid_lkm_userns_fsctx_orig);
 
 	if (unlikely(!orig))
-		orig = (typeof(orig))droid_lkm_userns_fsctx_hook.orig;
-	if (!orig)
+		orig = (typeof(orig))READ_ONCE(droid_lkm_userns_fsctx_hook.orig);
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_userns_fsctx_hook);
 		return ERR_PTR(-EAGAIN);
+	}
 
 	fc = orig(type, sb_flags);
+	ds_hook_leave(&droid_lkm_userns_fsctx_hook);
 
 	/*
 	 * alloc_fs_context() took the owner from current_user_ns() and get_user_ns() took no
@@ -292,40 +303,48 @@ int droid_lkm_userns_owner_init(void)
 		return ret;
 	}
 
-	ret = hk_inline_hook(&droid_lkm_userns_copymntns_hook, "copy_mnt_ns",
-			     "droid_lkm_userns_copymntns_wrap");
-	if (ret) {
-		droid_lkm_misc_warn("hook copy_mnt_ns failed: %d\n", ret);
-		return ret;
-	}
-	WRITE_ONCE(droid_lkm_userns_copymntns_orig, (void *)droid_lkm_userns_copymntns_hook.orig);
-
-	ret = hk_inline_hook(&droid_lkm_userns_fsctx_hook, "fs_context_for_mount",
-			     "droid_lkm_userns_fsctx_wrap");
-	if (ret) {
-		droid_lkm_misc_warn("hook fs_context_for_mount failed: %d\n", ret);
-		hk_inline_unhook(&droid_lkm_userns_copymntns_hook);
-		WRITE_ONCE(droid_lkm_userns_copymntns_orig, NULL);
-		return ret;
-	}
-	WRITE_ONCE(droid_lkm_userns_fsctx_orig, (void *)droid_lkm_userns_fsctx_hook.orig);
-
-	/*
-	 * required, not an addition: mnt_own() hands the mount namespace a reference that only
-	 * this hook can drop again. running without it would turn every namespace we hand out
-	 * into a dangling owner once the last credential goes
-	 */
-	ret = hk_inline_hook(&droid_lkm_userns_putmntns_hook, "put_mnt_ns",
-			     "droid_lkm_userns_putmntns_wrap");
+	/* Install put_mnt_ns accounting FIRST before copy_mnt_ns producer */
+	ret = ds_hook_install_kprobe_guard(&droid_lkm_userns_putmntns_hook,
+					   "put_mnt_ns",
+					   "droid_lkm_userns_putmntns_wrap",
+					   HK_REDIR_GUARD_CALLER);
 	if (ret) {
 		droid_lkm_misc_warn("hook put_mnt_ns failed: %d\n", ret);
-		hk_inline_unhook(&droid_lkm_userns_fsctx_hook);
-		WRITE_ONCE(droid_lkm_userns_fsctx_orig, NULL);
-		hk_inline_unhook(&droid_lkm_userns_copymntns_hook);
-		WRITE_ONCE(droid_lkm_userns_copymntns_orig, NULL);
 		return ret;
 	}
-	WRITE_ONCE(droid_lkm_userns_putmntns_orig, (void *)droid_lkm_userns_putmntns_hook.orig);
+	WRITE_ONCE(droid_lkm_userns_putmntns_orig,
+		   (typeof(droid_lkm_userns_putmntns_orig))
+			   droid_lkm_userns_putmntns_hook.orig);
+
+	ret = ds_hook_install_kprobe_guard(&droid_lkm_userns_copymntns_hook,
+					   "copy_mnt_ns",
+					   "droid_lkm_userns_copymntns_wrap",
+					   HK_REDIR_GUARD_CALLER);
+	if (ret) {
+		droid_lkm_misc_warn("hook copy_mnt_ns failed: %d\n", ret);
+		ds_hook_remove(&droid_lkm_userns_putmntns_hook);
+		WRITE_ONCE(droid_lkm_userns_putmntns_orig, NULL);
+		return ret;
+	}
+	WRITE_ONCE(droid_lkm_userns_copymntns_orig,
+		   (typeof(droid_lkm_userns_copymntns_orig))
+			   droid_lkm_userns_copymntns_hook.orig);
+
+	ret = ds_hook_install_kprobe_guard(&droid_lkm_userns_fsctx_hook,
+					   "fs_context_for_mount",
+					   "droid_lkm_userns_fsctx_wrap",
+					   HK_REDIR_GUARD_CALLER);
+	if (ret) {
+		droid_lkm_misc_warn("hook fs_context_for_mount failed: %d\n", ret);
+		ds_hook_remove(&droid_lkm_userns_copymntns_hook);
+		WRITE_ONCE(droid_lkm_userns_copymntns_orig, NULL);
+		ds_hook_remove(&droid_lkm_userns_putmntns_hook);
+		WRITE_ONCE(droid_lkm_userns_putmntns_orig, NULL);
+		return ret;
+	}
+	WRITE_ONCE(droid_lkm_userns_fsctx_orig,
+		   (typeof(droid_lkm_userns_fsctx_orig))
+			   droid_lkm_userns_fsctx_hook.orig);
 
 	droid_lkm_misc_dbg("owner: mntns_ops=0x%lx owner=0x%lx, three hooks up\n",
 		(unsigned long)droid_lkm_userns_mnt_ops,
@@ -336,16 +355,16 @@ int droid_lkm_userns_owner_init(void)
 
 void droid_lkm_userns_owner_exit(void)
 {
-	if (droid_lkm_userns_putmntns_orig) {
-		hk_inline_unhook(&droid_lkm_userns_putmntns_hook);
-		droid_lkm_userns_putmntns_orig = NULL;
+	if (droid_lkm_userns_fsctx_hook.live) {
+		ds_hook_remove(&droid_lkm_userns_fsctx_hook);
+		WRITE_ONCE(droid_lkm_userns_fsctx_orig, NULL);
 	}
-	if (droid_lkm_userns_fsctx_orig) {
-		hk_inline_unhook(&droid_lkm_userns_fsctx_hook);
-		droid_lkm_userns_fsctx_orig = NULL;
+	if (droid_lkm_userns_copymntns_hook.live) {
+		ds_hook_remove(&droid_lkm_userns_copymntns_hook);
+		WRITE_ONCE(droid_lkm_userns_copymntns_orig, NULL);
 	}
-	if (droid_lkm_userns_copymntns_orig) {
-		hk_inline_unhook(&droid_lkm_userns_copymntns_hook);
-		droid_lkm_userns_copymntns_orig = NULL;
+	if (droid_lkm_userns_putmntns_hook.live) {
+		ds_hook_remove(&droid_lkm_userns_putmntns_hook);
+		WRITE_ONCE(droid_lkm_userns_putmntns_orig, NULL);
 	}
 }

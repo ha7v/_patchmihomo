@@ -319,7 +319,8 @@ void droid_lkm_userns_stay_resident(const char *why)
 /* the other half, so an init that fails after registration leaves nothing pinned */
 void droid_lkm_userns_release_resident(void)
 {
-	if (!droid_lkm_userns_resident)
+	/* Never release residency once irreversible LSM hooks are spliced in */
+	if (!droid_lkm_userns_resident || droid_lkm_userns_lsm_active())
 		return;
 
 	droid_lkm_userns_resident = false;
@@ -348,7 +349,8 @@ int droid_lkm_userns_init(void)
 
 	ret = droid_lkm_userns_owner_init();
 	if (ret) {
-		droid_lkm_misc_report("userns", "unsupported", "owner symbols missing");
+		droid_lkm_misc_report("userns", "unsupported",
+				      "owner init failed (symbols or hooks)");
 		droid_lkm_userns_nsops_exit();
 		return ret;
 	}

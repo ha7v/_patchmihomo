@@ -150,7 +150,7 @@ ssize_t droid_lkm_misc_proc_read_text(char __user *ubuf, size_t count,
 	if (count > len - *ppos)
 		count = len - *ppos;
 
-	if (copy_to_user(ubuf + *ppos, text + *ppos, count))
+	if (copy_to_user(ubuf, text + *ppos, count))
 		return -EFAULT;
 
 	*ppos += count;

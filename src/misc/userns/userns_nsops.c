@@ -104,7 +104,8 @@ static int droid_lkm_userns_install(struct nsset *nsset, struct ns_common *ns)
 	 * capability set plus the user_ns pointer, and the gate above already established that
 	 * the caller holds CAP_SYS_ADMIN over the namespace it is entering
 	 */
-	droid_lkm_userns_install_cred(cred, u);
+	if (droid_lkm_userns_install_cred(cred, u))
+		return -EINVAL;
 
 	/*
 	 * commit_nsset() would commit this for us on a kernel with CONFIG_USER_NS, where it

@@ -323,20 +323,25 @@ def find_indirect_entries(
     results: List[Tuple[str, str, str, Path, int]] = []
 
     pat_two = re.compile(
-        r"\b(ds_hook_install(?:_guard|_text|_kprobe|_critical)?|"
+        r"\b(ds_hook_install(?:_guard|_text|_kprobe|_kprobe_guard|_critical|_critical_guard|_critical_kprobe_guard)?|"
+        r"ds_bhook_install|droid_lkm_userns_hook_(?:hot|lowfreq)|"
         r"hk_inline_hook|hk_redir_install)\s*\("
         r"[^;]*?\"([A-Za-z0-9_]+)\"\s*,\s*\"([A-Za-z0-9_]+)\"",
         re.S,
     )
     pat_slot = re.compile(
-        r"\bds_hook_install_slot(?:_critical)?\s*\("
+        r"\bds_hook_install_slot(?:_guard|_critical)?\s*\("
         r"[^;]*?,\s*(?:\([^)]*\)\s*)?&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*"
         r"\"([A-Za-z0-9_]+)\"\s*,\s*\"([A-Za-z0-9_]+)\"",
         re.S,
     )
     pat_at = re.compile(
-        r"\bhk_redir_install_at\s*\("
+        r"\b(?:hk_redir_install_at|ds_bhook_install_at|ds_bhook_install_core)\s*\("
         r"[^,;]+,\s*[^,;]+,\s*(?:\([^)]*\)\s*)?&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*,",
+        re.S,
+    )
+    pat_tp = re.compile(
+        r"\bdroid_lkm_tp_register\s*\([^,;]+,\s*(?:\([^)]*\)\s*)?&?\s*([A-Za-z_][A-Za-z0-9_]*)\s*,",
         re.S,
     )
     pat_syscall_slot = re.compile(
@@ -347,7 +352,7 @@ def find_indirect_entries(
 
     for p in c_files:
         r = rel(p, root)
-        if r in ("src/hook/ds_hook.c", "src/hook/ds_hook.h"):
+        if r in ("src/hook/ds_hook.c", "src/hook/ds_hook.h", "src/hook/ds_bhook.h"):
             continue
         raw = p.read_text(encoding="utf-8", errors="replace")
         no_comments = strip_c_comments(raw)
@@ -371,8 +376,17 @@ def find_indirect_entries(
 
         for m in pat_at.finditer(no_comments):
             wrap = m.group(1)
+            if wrap in ("repl",):
+                continue
             line = no_comments.count("\n", 0, m.start()) + 1
             results.append(("hook-at", "<addr>", wrap, p, line))
+
+        for m in pat_tp.finditer(no_comments):
+            wrap = m.group(1)
+            if wrap in ("probe",):
+                continue
+            line = no_comments.count("\n", 0, m.start()) + 1
+            results.append(("tracepoint", "sched_process_exit", wrap, p, line))
 
         for m in pat_syscall_slot.finditer(no_comments):
             nr_sym, fn = m.group(1), m.group(2)
@@ -1009,6 +1023,27 @@ def check_layout_direct_deref(
 # Rule 6: Kbuild / shell / Gradle packaging & deps checks
 # ---------------------------------------------------------------------------
 
+def check_raw_hk_inline_hook(c_files: List[Path], findings: List[Finding], root: Path = ROOT) -> None:
+    """Reject raw hk_inline_hook() outside src/hook/ (bypasses bhook/kprobe routing & PAC handling)."""
+    pat = re.compile(r"\bhk_inline_hook\s*\(")
+    for p in c_files:
+        r = rel(p, root)
+        if r.startswith("src/hook/"):
+            continue
+        no_comments = strip_c_comments(p.read_text(encoding="utf-8", errors="replace"))
+        for m in pat.finditer(no_comments):
+            line = no_comments.count("\n", 0, m.start()) + 1
+            findings.append(
+                Finding(
+                    "ERROR",
+                    "raw-hk-inline-hook",
+                    r,
+                    line,
+                    "direct hk_inline_hook() fails with -95 on PAC kernels; route through ds_hook_install_*()",
+                )
+            )
+
+
 def check_makefile_objects(findings: List[Finding], root: Path = ROOT) -> int:
     mk = root / "Makefile"
     if not mk.exists():
@@ -1016,7 +1051,9 @@ def check_makefile_objects(findings: List[Finding], root: Path = ROOT) -> int:
     text = mk.read_text(encoding="utf-8", errors="replace")
     active_lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
     active = "\n".join(active_lines)
-    misc_enabled = bool(re.search(r"^\s*obj-\$\(DLKM_OPT\)\s*\+=\s*droid_lkm_misc\.o", active, re.M))
+    misc_enabled = bool(
+        re.search(r"^\s*obj-\$\((?:DLKM_OPT|MISC_OPT)\)\s*\+=\s*droid_lkm_misc\.o", active, re.M)
+    )
     checked = 0
     for m in re.finditer(r"\b(src/[A-Za-z0-9_./-]+\.o)\b", active):
         obj = m.group(1)
@@ -1148,6 +1185,7 @@ def run_checks(
     check_ns_common_ops(c_files, parsed, findings, root=root)
     check_ti_and_mqueue_invariants(c_files, parsed, findings, root=root)
     check_hk_cfg_write_path(c_files, findings, root=root)
+    check_raw_hk_inline_hook(c_files, findings, root=root)
     n_deref = check_layout_direct_deref(
         parsed, findings, root=root, managed_override=managed_override
     )

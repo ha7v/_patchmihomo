@@ -262,7 +262,7 @@ def extract_ksym_contracts() -> Dict[str, List[str]]:
     # Hook targets across active src/ (excluding src/misc/ and src/hook/)
     hook_targets: List[str] = []
     hook_pat = re.compile(
-        r'\b(?:ds_hook_install(?:_guard|_text|_kprobe|_critical|_slot|_slot_critical)?|'
+        r'\b(?:ds_hook_install(?:_guard|_text|_kprobe|_kprobe_guard|_critical|_critical_guard|_critical_kprobe_guard|_slot|_slot_guard|_slot_critical)?|'
         r'hk_redir_install)\s*\([^;]*?"([A-Za-z0-9_]+)"\s*,\s*"[A-Za-z0-9_]+"',
         re.S,
     )

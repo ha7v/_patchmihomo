@@ -6,7 +6,7 @@ MDIR := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 # make clean would wipe every target
 ODIR := $(MDIR)/out/$(if $(VER),$(VER),unknown)
 
-DEPS := Type_info KernCall HooKern vendorcompat
+DEPS := Type_info KernCall HooKern
 include $(MDIR)/mk/deps.mk
 
 # both ko's link the whole type info reader now
@@ -14,6 +14,9 @@ include $(MDIR)/mk/deps.mk
 
 # optional HooKern features we do not use
 DEPS_OBJS_ALL := $(filter-out deps/HooKern/lib/hk_binder.o deps/HooKern/lib/hk_lsm.o,$(DEPS_OBJS_ALL))
+
+# shared hook routing + single-instruction 4-byte B inline engine
+DS_HOOK_OBJS := src/hook/ds_hook.o src/hook/ds_bhook.o src/hook/ds_bhook_slots.o
 
 # second ko in the same Kbuild: vendor compatibility fixups
 #   ghost task fallback for find_task_by_vpid
@@ -29,7 +32,7 @@ obj-$(VENDOR_OPT) += droid_lkm_vendor.o
 DLC_VENDOR_OBJS := src/compat/vendor/compat_main.o src/compat/vendor/ghost.o \
 	src/compat/vendor/ddl_hit.o src/compat/vendor/vendor_syms.o \
 	src/compat/ds_compat.o src/compat/ds_layout_anchor.o \
-	src/hook/ds_hook.o
+	$(DS_HOOK_OBJS)
 droid_lkm_vendor-y := $(DLC_VENDOR_OBJS) $(DEPS_OBJS_ALL)
 
 # third ko in the same Kbuild: container scoped kernel features stock GKI leaves
@@ -45,6 +48,7 @@ DLM_OBJS := src/misc/misc_main.o \
 	src/misc/misc_proc.o \
 	src/compat/ds_compat.o \
 	src/compat/ds_layout_anchor.o \
+	$(DS_HOOK_OBJS) \
 	src/misc/xt/xt_reg.o \
 	src/misc/xt/xt_addrtype.o \
 	src/misc/devtmpfs/devtmpfs.o \
@@ -56,6 +60,7 @@ DLM_OBJS := src/misc/misc_main.o \
 	src/misc/userns/userns_proc.o \
 	src/misc/userns/userns_selftest.o \
 	src/misc/userns/userns_captrace.o \
+	src/misc/userns/userns_lsm.o \
 	src/misc/userns/userns_hooks.o
 droid_lkm_misc-y := $(DLM_OBJS) $(DEPS_OBJS_ALL)
 
@@ -84,7 +89,7 @@ NATIVE_PID_OBJ := src/native/kernel/pid_namespace.o \
 endif
 
 droid_lkm-y := src/main/core/main.o src/main/core/ds_features.o \
-	src/hook/ds_hook.o src/compat/ds_compat.o \
+	$(DS_HOOK_OBJS) src/compat/ds_compat.o \
 	src/compat/ds_layout_anchor.o \
 	$(MUNMAP_UNIT) \
 	src/main/core/ds_ksym.o \
@@ -113,6 +118,7 @@ droid_lkm-y := src/main/core/main.o src/main/core/ds_features.o \
 	$(DEPS_OBJS_ALL)
 
 ccflags-y += -std=gnu11
+ccflags-y += -fno-optimize-sibling-calls
 ccflags-y += -Wno-declaration-after-statement
 # dead static hk_build_jump in HooKern
 ccflags-y += -Wno-unused-function

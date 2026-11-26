@@ -27,8 +27,49 @@
 #include "misc_ksym.h"
 #include "userns.h"
 
-void droid_lkm_userns_install_cred(struct cred *new, struct droid_lkm_userns *u)
+/*
+ * F1-a / F1-b fail-closed boundary: if a fake user namespace reference cannot
+ * be acquired, strip all capability sets before assigning init_user_ns so a
+ * container credential can never inherit CAP_FULL_SET over the host.
+ */
+void droid_lkm_userns_cred_fail_closed(struct cred *new)
 {
+	if (!new)
+		return;
+	new->cap_inheritable = CAP_EMPTY_SET;
+	new->cap_permitted = CAP_EMPTY_SET;
+	new->cap_effective = CAP_EMPTY_SET;
+	new->cap_ambient = CAP_EMPTY_SET;
+	new->cap_bset = CAP_EMPTY_SET;
+	WRITE_ONCE(new->user_ns, droid_lkm_userns_init_uns);
+}
+
+int droid_lkm_userns_install_cred(struct cred *new, struct droid_lkm_userns *u)
+{
+	struct droid_lkm_userns *old_u;
+	bool same_ns;
+
+	if (!new)
+		return -EINVAL;
+
+	/* Never elevate a host init_user_ns credential with CAP_FULL_SET */
+	if (!u) {
+		old_u = droid_lkm_userns_from_ns(new->user_ns);
+		droid_lkm_userns_cred_fail_closed(new);
+		if (old_u)
+			droid_lkm_userns_put(old_u);
+		return -EINVAL;
+	}
+
+	same_ns = (new->user_ns == &u->uns);
+	if (!same_ns && !droid_lkm_userns_get(u)) {
+		old_u = droid_lkm_userns_from_ns(new->user_ns);
+		droid_lkm_userns_cred_fail_closed(new);
+		if (old_u)
+			droid_lkm_userns_put(old_u);
+		return -EINVAL;
+	}
+
 	new->securebits = SECUREBITS_DEFAULT;
 	new->cap_inheritable = CAP_FULL_SET;
 	new->cap_permitted = CAP_FULL_SET;
@@ -49,29 +90,30 @@ void droid_lkm_userns_install_cred(struct cred *new, struct droid_lkm_userns *u)
 		}
 	}
 #endif
-	if (new->user_ns == (u ? &u->uns : droid_lkm_userns_init_uns))
-		return;
+	if (same_ns)
+		return 0;
 
-	{
-		struct droid_lkm_userns *old_u = droid_lkm_userns_from_ns(new->user_ns);
-
-		if (u && !droid_lkm_userns_get(u))
-			u = NULL;
-		new->user_ns = u ? &u->uns : droid_lkm_userns_init_uns;
-		if (old_u)
-			droid_lkm_userns_put(old_u);
-	}
+	old_u = droid_lkm_userns_from_ns(new->user_ns);
+	WRITE_ONCE(new->user_ns, &u->uns);
+	if (old_u)
+		droid_lkm_userns_put(old_u);
+	return 0;
 }
 
 int droid_lkm_userns_install_current(struct droid_lkm_userns *u)
 {
 	struct cred *new;
+	int ret;
 
 	new = droid_lkm_misc_ks.prepare_creds();
 	if (!new)
 		return -ENOMEM;
 
-	droid_lkm_userns_install_cred(new, u);
+	ret = droid_lkm_userns_install_cred(new, u);
+	if (ret) {
+		put_cred(new);
+		return ret;
+	}
 	droid_lkm_misc_ks.commit_creds(new);
 
 	return 0;

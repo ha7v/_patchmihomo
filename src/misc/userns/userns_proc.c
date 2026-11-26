@@ -52,7 +52,7 @@
 #include "misc_ksym.h"
 #include "misc_proc.h"
 #include "userns.h"
-#include "hk_inline.h"
+#include "ds_hook.h"
 
 static DEFINE_MUTEX(droid_lkm_userns_proc_mutex);
 
@@ -79,8 +79,8 @@ static void (*droid_lkm_userns_proc_set_d_op)(struct dentry *dentry,
 		const struct dentry_operations *op);
 static const struct dentry_operations *droid_lkm_userns_proc_dentry_ops;
 
-static struct hk_inline droid_lkm_userns_proc_tgid_hook;
-static struct hk_inline droid_lkm_userns_proc_tid_hook;
+static struct ds_hook droid_lkm_userns_proc_tgid_hook;
+static struct ds_hook droid_lkm_userns_proc_tid_hook;
 static struct dentry *(*droid_lkm_userns_proc_tgid_orig)(struct inode *dir,
 		struct dentry *dentry, unsigned int flags);
 static struct dentry *(*droid_lkm_userns_proc_tid_orig)(struct inode *dir,
@@ -301,10 +301,7 @@ static bool droid_lkm_file_ns_capable(const struct file *file,
 	if (unlikely(!file || !file->f_cred || !cap_valid(cap)))
 		return false;
 
-	if (droid_lkm_misc_ks.security_capable)
-		return droid_lkm_misc_ks.security_capable(file->f_cred, ns, cap, CAP_OPT_NONE) == 0;
-
-	return ns_capable(ns, cap);
+	return droid_lkm_userns_capable(file->f_cred, ns, cap, CAP_OPT_NONE) == 0;
 }
 
 /*
@@ -564,9 +561,10 @@ static const struct droid_lkm_userns_proc_file droid_lkm_userns_proc_files[] = {
 	{ "setgroups",	9,	&droid_lkm_userns_setgroups_fops },
 };
 
-static struct dentry *droid_lkm_userns_proc_instantiate(struct dentry *dentry,
-							struct task_struct *task,
-							const struct file_operations *fops)
+static __nocfi noinline struct dentry *
+droid_lkm_userns_proc_instantiate(struct dentry *dentry,
+				  struct task_struct *task,
+				  const struct file_operations *fops)
 {
 	struct inode *inode;
 
@@ -596,6 +594,7 @@ static struct dentry *droid_lkm_userns_proc_instantiate(struct dentry *dentry,
 __nocfi noinline static struct dentry *
 droid_lkm_userns_proc_lookup(struct inode *dir, struct dentry *dentry,
 			     unsigned int flags,
+			     struct ds_hook *hook,
 			     struct dentry *(*orig)(struct inode *,
 						    struct dentry *,
 						    unsigned int))
@@ -608,6 +607,7 @@ droid_lkm_userns_proc_lookup(struct inode *dir, struct dentry *dentry,
 	unsigned int i;
 
 	res = orig(dir, dentry, flags);
+	ds_hook_leave(hook);
 	/* a NULL return is a successful alias, only ENOENT means "no entry" */
 	if (!IS_ERR(res) || PTR_ERR(res) != -ENOENT)
 		return res;
@@ -652,22 +652,38 @@ DROID_LKM_ENTRY __nocfi noinline struct dentry *
 droid_lkm_userns_proc_tgid_lookup(struct inode *dir, struct dentry *dentry,
 				  unsigned int flags)
 {
-	if (!droid_lkm_userns_proc_tgid_orig)
+	typeof(droid_lkm_userns_proc_tgid_orig) orig =
+		READ_ONCE(droid_lkm_userns_proc_tgid_orig);
+
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_userns_proc_tgid_hook.orig);
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_userns_proc_tgid_hook);
 		return ERR_PTR(-ENOENT);
+	}
 
 	return droid_lkm_userns_proc_lookup(dir, dentry, flags,
-					    droid_lkm_userns_proc_tgid_orig);
+					    &droid_lkm_userns_proc_tgid_hook,
+					    orig);
 }
 
 DROID_LKM_ENTRY __nocfi noinline struct dentry *
 droid_lkm_userns_proc_tid_lookup(struct inode *dir, struct dentry *dentry,
 				 unsigned int flags)
 {
-	if (!droid_lkm_userns_proc_tid_orig)
+	typeof(droid_lkm_userns_proc_tid_orig) orig =
+		READ_ONCE(droid_lkm_userns_proc_tid_orig);
+
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_userns_proc_tid_hook.orig);
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_userns_proc_tid_hook);
 		return ERR_PTR(-ENOENT);
+	}
 
 	return droid_lkm_userns_proc_lookup(dir, dentry, flags,
-					    droid_lkm_userns_proc_tid_orig);
+					    &droid_lkm_userns_proc_tid_hook,
+					    orig);
 }
 
 static int droid_lkm_userns_proc_resolve(void)
@@ -707,31 +723,74 @@ static int droid_lkm_userns_proc_resolve(void)
 
 int droid_lkm_userns_proc_init(void)
 {
+	struct inode_operations *tgid_iops, *tid_iops;
 	int ret;
 
 	ret = droid_lkm_userns_proc_resolve();
 	if (ret)
 		return ret;
 
-	ret = hk_inline_hook(&droid_lkm_userns_proc_tgid_hook, "proc_tgid_base_lookup",
-			     "droid_lkm_userns_proc_tgid_lookup");
+	tgid_iops = (struct inode_operations *)droid_lkm_misc_sym(
+		"proc_tgid_base_inode_operations");
+	tid_iops = (struct inode_operations *)droid_lkm_misc_sym(
+		"proc_tid_base_inode_operations");
+
+	/*
+	 * Prefer replacing the .lookup slot in proc_t{g,}id_base_inode_operations
+	 * (zero text patching, zero kprobe traps); fall back to function routes
+	 * if the table symbol is absent or slot verification/write refuses.
+	 */
+	if (tgid_iops) {
+		ret = ds_hook_install_slot_guard(
+			&droid_lkm_userns_proc_tgid_hook,
+			(void **)&tgid_iops->lookup,
+			droid_lkm_userns_proc_tgid_lookup,
+			"proc_tgid_base_lookup",
+			"droid_lkm_userns_proc_tgid_lookup",
+			HK_REDIR_GUARD_CALLER);
+	} else {
+		ret = ds_hook_install_guard(
+			&droid_lkm_userns_proc_tgid_hook,
+			"proc_tgid_base_lookup",
+			"droid_lkm_userns_proc_tgid_lookup",
+			HK_REDIR_GUARD_CALLER);
+	}
 	if (ret) {
 		droid_lkm_misc_warn("hook proc_tgid_base_lookup failed: %d\n", ret);
 		return ret;
 	}
-	droid_lkm_userns_proc_tgid_orig = (void *)droid_lkm_userns_proc_tgid_hook.orig;
+	WRITE_ONCE(droid_lkm_userns_proc_tgid_orig,
+		   (typeof(droid_lkm_userns_proc_tgid_orig))
+			   droid_lkm_userns_proc_tgid_hook.orig);
 
-	ret = hk_inline_hook(&droid_lkm_userns_proc_tid_hook, "proc_tid_base_lookup",
-			     "droid_lkm_userns_proc_tid_lookup");
+	if (tid_iops) {
+		ret = ds_hook_install_slot_guard(
+			&droid_lkm_userns_proc_tid_hook,
+			(void **)&tid_iops->lookup,
+			droid_lkm_userns_proc_tid_lookup,
+			"proc_tid_base_lookup",
+			"droid_lkm_userns_proc_tid_lookup",
+			HK_REDIR_GUARD_CALLER);
+	} else {
+		ret = ds_hook_install_guard(
+			&droid_lkm_userns_proc_tid_hook,
+			"proc_tid_base_lookup",
+			"droid_lkm_userns_proc_tid_lookup",
+			HK_REDIR_GUARD_CALLER);
+	}
 	if (ret) {
 		droid_lkm_misc_warn("hook proc_tid_base_lookup failed: %d\n", ret);
-		hk_inline_unhook(&droid_lkm_userns_proc_tgid_hook);
-		droid_lkm_userns_proc_tgid_orig = NULL;
+		ds_hook_remove(&droid_lkm_userns_proc_tgid_hook);
+		WRITE_ONCE(droid_lkm_userns_proc_tgid_orig, NULL);
 		return ret;
 	}
-	droid_lkm_userns_proc_tid_orig = (void *)droid_lkm_userns_proc_tid_hook.orig;
+	WRITE_ONCE(droid_lkm_userns_proc_tid_orig,
+		   (typeof(droid_lkm_userns_proc_tid_orig))
+			   droid_lkm_userns_proc_tid_hook.orig);
 
-	droid_lkm_misc_info("id map files ready\n");
+	droid_lkm_misc_info("id map files ready (tgid=%s tid=%s)\n",
+			    ds_hook_route_name(droid_lkm_userns_proc_tgid_hook.route),
+			    ds_hook_route_name(droid_lkm_userns_proc_tid_hook.route));
 	droid_lkm_misc_report("userns id map files", "ready",
 			      "uid_map gid_map setgroups under /proc/<pid>");
 
@@ -745,12 +804,12 @@ int droid_lkm_userns_proc_init(void)
  */
 void droid_lkm_userns_proc_exit(void)
 {
-	if (droid_lkm_userns_proc_tid_orig) {
-		hk_inline_unhook(&droid_lkm_userns_proc_tid_hook);
-		droid_lkm_userns_proc_tid_orig = NULL;
+	if (droid_lkm_userns_proc_tid_hook.live) {
+		ds_hook_remove(&droid_lkm_userns_proc_tid_hook);
+		WRITE_ONCE(droid_lkm_userns_proc_tid_orig, NULL);
 	}
-	if (droid_lkm_userns_proc_tgid_orig) {
-		hk_inline_unhook(&droid_lkm_userns_proc_tgid_hook);
-		droid_lkm_userns_proc_tgid_orig = NULL;
+	if (droid_lkm_userns_proc_tgid_hook.live) {
+		ds_hook_remove(&droid_lkm_userns_proc_tgid_hook);
+		WRITE_ONCE(droid_lkm_userns_proc_tgid_orig, NULL);
 	}
 }

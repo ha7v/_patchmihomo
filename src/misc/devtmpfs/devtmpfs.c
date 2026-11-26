@@ -67,7 +67,7 @@
 #include "misc.h"
 #include "misc_ksym.h"
 #include "misc_proc.h"
-#include "hk_inline.h"
+#include "ds_hook.h"
 #include "devtmpfs.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
@@ -117,8 +117,8 @@ static bool droid_lkm_devtmpfs_registered;
 static unsigned long droid_lkm_devtmpfs_nodes;
 static const struct cred *droid_lkm_devtmpfs_node_cred;
 
-static struct hk_inline droid_lkm_devtmpfs_add_hook;
-static struct hk_inline droid_lkm_devtmpfs_del_hook;
+static struct ds_hook droid_lkm_devtmpfs_add_hook;
+static struct ds_hook droid_lkm_devtmpfs_del_hook;
 static int (*droid_lkm_devtmpfs_add_orig)(struct device *dev);
 static void (*droid_lkm_devtmpfs_del_orig)(struct device *dev);
 
@@ -623,12 +623,19 @@ static void droid_lkm_devtmpfs_populate(void)
 
 DROID_LKM_ENTRY __nocfi noinline int droid_lkm_devtmpfs_device_add(struct device *dev)
 {
+	typeof(droid_lkm_devtmpfs_add_orig) orig =
+		READ_ONCE(droid_lkm_devtmpfs_add_orig);
 	int ret;
 
-	if (!droid_lkm_devtmpfs_add_orig)
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_devtmpfs_add_hook.orig);
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_devtmpfs_add_hook);
 		return -ENODEV;
+	}
 
-	ret = droid_lkm_devtmpfs_add_orig(dev);
+	ret = orig(dev);
+	ds_hook_leave(&droid_lkm_devtmpfs_add_hook);
 	if (!ret && dev && MAJOR(dev->devt))
 		droid_lkm_devtmpfs_create_node(dev);
 
@@ -637,10 +644,18 @@ DROID_LKM_ENTRY __nocfi noinline int droid_lkm_devtmpfs_device_add(struct device
 
 DROID_LKM_ENTRY __nocfi noinline void droid_lkm_devtmpfs_device_del(struct device *dev)
 {
-	if (!droid_lkm_devtmpfs_del_orig)
-		return;
+	typeof(droid_lkm_devtmpfs_del_orig) orig =
+		READ_ONCE(droid_lkm_devtmpfs_del_orig);
 
-	droid_lkm_devtmpfs_del_orig(dev);
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_devtmpfs_del_hook.orig);
+	if (!orig) {
+		ds_hook_leave(&droid_lkm_devtmpfs_del_hook);
+		return;
+	}
+
+	orig(dev);
+	ds_hook_leave(&droid_lkm_devtmpfs_del_hook);
 	if (dev && MAJOR(dev->devt))
 		droid_lkm_devtmpfs_delete_node(dev);
 }
@@ -750,23 +765,31 @@ int droid_lkm_misc_devtmpfs_init(void)
 		goto out_creds;
 	}
 
-	err = hk_inline_hook(&droid_lkm_devtmpfs_add_hook, "device_add",
-			     "droid_lkm_devtmpfs_device_add");
+	err = ds_hook_install_kprobe_guard(&droid_lkm_devtmpfs_add_hook,
+					   "device_add",
+					   "droid_lkm_devtmpfs_device_add",
+					   HK_REDIR_GUARD_CALLER);
 	if (err) {
 		droid_lkm_misc_warn("devtmpfs: hook device_add failed: %d\n", err);
 		droid_lkm_misc_report("devtmpfs", "unsupported", "device_add hook failed");
 		goto out_stop;
 	}
-	droid_lkm_devtmpfs_add_orig = (void *)droid_lkm_devtmpfs_add_hook.orig;
+	WRITE_ONCE(droid_lkm_devtmpfs_add_orig,
+		   (typeof(droid_lkm_devtmpfs_add_orig))
+			   droid_lkm_devtmpfs_add_hook.orig);
 
-	err = hk_inline_hook(&droid_lkm_devtmpfs_del_hook, "device_del",
-			     "droid_lkm_devtmpfs_device_del");
+	err = ds_hook_install_kprobe_guard(&droid_lkm_devtmpfs_del_hook,
+					   "device_del",
+					   "droid_lkm_devtmpfs_device_del",
+					   HK_REDIR_GUARD_CALLER);
 	if (err) {
 		droid_lkm_misc_warn("devtmpfs: hook device_del failed: %d\n", err);
 		droid_lkm_misc_report("devtmpfs", "unsupported", "device_del hook failed");
 		goto out_unhook_add;
 	}
-	droid_lkm_devtmpfs_del_orig = (void *)droid_lkm_devtmpfs_del_hook.orig;
+	WRITE_ONCE(droid_lkm_devtmpfs_del_orig,
+		   (typeof(droid_lkm_devtmpfs_del_orig))
+			   droid_lkm_devtmpfs_del_hook.orig);
 
 	droid_lkm_devtmpfs_populate();
 
@@ -778,8 +801,8 @@ int droid_lkm_misc_devtmpfs_init(void)
 	return 0;
 
 out_unhook_add:
-	hk_inline_unhook(&droid_lkm_devtmpfs_add_hook);
-	droid_lkm_devtmpfs_add_orig = NULL;
+	ds_hook_remove(&droid_lkm_devtmpfs_add_hook);
+	WRITE_ONCE(droid_lkm_devtmpfs_add_orig, NULL);
 out_stop:
 	kthread_stop(droid_lkm_devtmpfs_thread);
 	droid_lkm_devtmpfs_thread = NULL;
@@ -801,13 +824,13 @@ static void droid_lkm_devtmpfs_teardown(void)
 {
 	int err;
 
-	if (droid_lkm_devtmpfs_del_orig) {
-		hk_inline_unhook(&droid_lkm_devtmpfs_del_hook);
-		droid_lkm_devtmpfs_del_orig = NULL;
+	if (droid_lkm_devtmpfs_del_hook.live) {
+		ds_hook_remove(&droid_lkm_devtmpfs_del_hook);
+		WRITE_ONCE(droid_lkm_devtmpfs_del_orig, NULL);
 	}
-	if (droid_lkm_devtmpfs_add_orig) {
-		hk_inline_unhook(&droid_lkm_devtmpfs_add_hook);
-		droid_lkm_devtmpfs_add_orig = NULL;
+	if (droid_lkm_devtmpfs_add_hook.live) {
+		ds_hook_remove(&droid_lkm_devtmpfs_add_hook);
+		WRITE_ONCE(droid_lkm_devtmpfs_add_orig, NULL);
 	}
 
 	mutex_lock(&droid_lkm_devtmpfs_lock);

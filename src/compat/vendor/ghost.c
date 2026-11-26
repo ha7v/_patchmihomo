@@ -25,7 +25,6 @@
 #include "ds_hook.h"
 #include "ghost.h"
 #include "vendor_syms.h"
-#include "hk_inline.h"
 
 /* 6.18 builds with -Wmissing-prototypes */
 DROID_LKM_ENTRY __nocfi noinline struct task_struct *dlc_ftbv_wrap(pid_t vnr);
@@ -120,6 +119,8 @@ DROID_LKM_ENTRY __nocfi noinline struct task_struct *dlc_ftbv_wrap(pid_t vnr)
 	bool is_vendor = false;
 
 	orig = READ_ONCE(dlc_ftbv_orig);
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(dlc_ftbv_hook.orig);
 	if (likely(orig))
 		task = orig(vnr);
 
@@ -420,27 +421,11 @@ int dlc_ghost_init(void)
 	}
 
 	/*
-	 * the engine patches the end of a branch chain when the entry is a thunk,
-	 * and on a +lto kernel find_task_by_vpid is one. the trampoline of that
-	 * build loops back into the patched entry, so a call recurses until the
-	 * kernel stack is gone. judge the entry first and refuse a shape the
-	 * engine cannot drive, the feature degrades instead of panicking
+	 * Hot-path single-instruction B hook first (safe on PAC/non-PAC; rejects
+	 * LTO branch thunks and falls back cleanly to kprobe GUARD_CALLER).
 	 */
-	{
-		struct hk_inline_probe probe;
-
-		memset(&probe, 0, sizeof(probe));
-		if (!hk_inline_probe("find_task_by_vpid", &probe) &&
-		    probe.state != HK_INLINE_PLAIN) {
-			pr_err("[E] [droid_lkm_vendor] ghost: find_task_by_vpid entry state %d (%s) target 0x%lx, inline hook refused\n",
-			       probe.state, probe.reason ? probe.reason : "?",
-			       probe.target);
-			dlc_ghost_free_task(false);
-			return -EOPNOTSUPP;
-		}
-	}
-
-	ret = ds_hook_install(&dlc_ftbv_hook, "find_task_by_vpid", "dlc_ftbv_wrap");
+	ret = ds_hook_install_guard(&dlc_ftbv_hook, "find_task_by_vpid",
+				    "dlc_ftbv_wrap", HK_REDIR_GUARD_CALLER);
 	if (ret) {
 		pr_err("[E] [droid_lkm_vendor] ghost: hook find_task_by_vpid failed %d\n", ret);
 		dlc_ghost_free_task(false);
@@ -448,7 +433,8 @@ int dlc_ghost_init(void)
 	}
 	smp_wmb();
 	WRITE_ONCE(dlc_ftbv_orig, (typeof(dlc_ftbv_orig))dlc_ftbv_hook.orig);
-	pr_info("[I] [droid_lkm_vendor] ghost: find_task_by_vpid hooked, match=%s\n",
+	pr_info("[I] [droid_lkm_vendor] ghost: find_task_by_vpid hooked (%s), match=%s\n",
+		ds_hook_route_name(dlc_ftbv_hook.route),
 		dlc_ghost_match ? dlc_ghost_match : "");
 	return 0;
 }

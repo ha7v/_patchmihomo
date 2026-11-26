@@ -58,6 +58,21 @@ void droid_lkm_userns_exit(void);
 int droid_lkm_userns_hooks_init(void);
 void droid_lkm_userns_hooks_exit(void);
 
+/* BTF-driven LSM cred_{prepare,free,transfer} hooks (preferred over text/kprobe) */
+int droid_lkm_userns_lsm_init(void);
+bool droid_lkm_userns_lsm_active(void);
+
+/* set at init if creds carry an LSM security blob (used by F2 lsm_cred_alloc guard) */
+extern bool droid_lkm_userns_has_cred_security;
+
+/* publish gate: producers do not intercept CLONE_NEWUSER until all hooks are armed */
+extern bool droid_lkm_userns_ready;
+
+/* direct capability evaluator (avoids GUARD_CALLER bypass on kprobe fallback) */
+int droid_lkm_userns_capable(const struct cred *cred,
+			     struct user_namespace *ns,
+			     int cap, unsigned int opts);
+
 /* the initial user namespace, resolved once and shared by the owner work */
 extern struct user_namespace *droid_lkm_userns_init_uns;
 
@@ -94,7 +109,8 @@ unsigned int droid_lkm_userns_live(void);
 bool droid_lkm_userns_is_ours(const struct user_namespace *uns);
 
 int droid_lkm_userns_install_current(struct droid_lkm_userns *u);
-void droid_lkm_userns_install_cred(struct cred *new, struct droid_lkm_userns *u);
+int droid_lkm_userns_install_cred(struct cred *new, struct droid_lkm_userns *u);
+void droid_lkm_userns_cred_fail_closed(struct cred *new);
 
 const struct proc_ns_operations *droid_lkm_userns_ops(void);
 const struct proc_ns_operations *droid_lkm_userns_ops_for(struct task_struct *task);

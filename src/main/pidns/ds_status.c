@@ -212,9 +212,17 @@ DROID_LKM_ENTRY __nocfi noinline int droid_lkm_status_wrap(struct seq_file *m,
 					   struct pid *pid,
 					   struct task_struct *task)
 {
+	typeof(droid_lkm_status_orig) orig = READ_ONCE(droid_lkm_status_orig);
 	int ret;
 
-	ret = droid_lkm_status_orig(m, ns, pid, task);
+	if (unlikely(!orig))
+		orig = (typeof(orig))READ_ONCE(droid_lkm_status_hook.orig);
+	if (unlikely(!orig)) {
+		ds_hook_leave(&droid_lkm_status_hook);
+		return 0;
+	}
+
+	ret = orig(m, ns, pid, task);
 	ds_hook_leave(&droid_lkm_status_hook);
 	if (ret || !task || !pid)
 		return ret;
@@ -278,23 +286,17 @@ int droid_lkm_status_init(void)
 		droid_lkm_status_can_insert = !droid_lkm_status_append;
 	}
 
-	ret = ds_hook_install_text(&droid_lkm_status_hook, "proc_pid_status",
-				   "droid_lkm_status_wrap");
-	if (ret) {
-		droid_lkm_warn("NSpid emulation: proc_pid_status text route refused (%d), trying kprobe\n",
-			       ret);
-		ret = ds_hook_install_kprobe(&droid_lkm_status_hook,
-					     "proc_pid_status",
-					     "droid_lkm_status_wrap");
-	}
+	ret = ds_hook_install_guard(&droid_lkm_status_hook, "proc_pid_status",
+				    "droid_lkm_status_wrap",
+				    HK_REDIR_GUARD_CALLER);
 	if (ret) {
 		droid_lkm_warn("NSpid emulation skipped, proc_pid_status hook failed (%d)\n",
 			       ret);
 		return ret;
 	}
 
-	droid_lkm_status_orig =
-		(typeof(droid_lkm_status_orig))droid_lkm_status_hook.orig;
+	WRITE_ONCE(droid_lkm_status_orig,
+		   (typeof(droid_lkm_status_orig))droid_lkm_status_hook.orig);
 	droid_lkm_status_hooked = true;
 
 	if (droid_lkm_status_can_insert)

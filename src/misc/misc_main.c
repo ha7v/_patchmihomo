@@ -7,6 +7,7 @@
 #include <linux/init.h>
 
 #include "core.h"
+#include "ds_hook.h"
 #include "hk.h"
 #include "hk_patch.h"
 #include "misc.h"
@@ -100,6 +101,7 @@ static int __init droid_lkm_misc_init(void)
 		return ret;
 	}
 	droid_lkm_misc_hk_up = true;
+	ds_hook_policy_apply();
 
 	/* an offset this build cannot vouch for is not dereferenced: userns stays off */
 	droid_lkm_misc_layout_init();
@@ -139,11 +141,13 @@ static int __init droid_lkm_misc_init(void)
 		droid_lkm_misc_report("userns", "off", "userns=0");
 	}
 
+	ds_hook_report();
 	return 0;
 
 err_proc:
 	droid_lkm_misc_proc_exit();
 	if (droid_lkm_misc_hk_up) {
+		ds_hook_exit();
 		hk_exit();
 		droid_lkm_misc_hk_up = false;
 	}
@@ -161,6 +165,7 @@ static void __exit droid_lkm_misc_exit(void)
 	droid_lkm_misc_xt_exit();
 	droid_lkm_misc_proc_exit();
 	if (droid_lkm_misc_hk_up) {
+		ds_hook_exit();
 		hk_exit();
 		droid_lkm_misc_hk_up = false;
 	}
