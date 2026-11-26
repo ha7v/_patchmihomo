@@ -16,10 +16,12 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/user_namespace.h>
 
 #include "hk_patch.h"
 #include "ds_hook.h"
 #include "ds.h"
+#include "ds_ksym.h"
 
 DROID_LKM_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 #include "ds_ipcns.h"
