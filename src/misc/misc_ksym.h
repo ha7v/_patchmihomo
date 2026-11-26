@@ -14,6 +14,7 @@
 #include <linux/nsproxy.h>
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_ipv6.h>
+#include <net/net_namespace.h>
 #include <net/route.h>
 #include <net/ipv6.h>
 
@@ -50,11 +51,13 @@ struct droid_lkm_misc_ksym {
 	typeof(&__nf_ip6_route)		__nf_ip6_route;
 
 	/* fake namespaces */
-	typeof(&proc_alloc_inum)	proc_alloc_inum;
-	typeof(&proc_free_inum)		proc_free_inum;
-	typeof(&prepare_creds)		prepare_creds;
-	typeof(&commit_creds)		commit_creds;
-	typeof(&key_put)		key_put;
+	typeof(&proc_alloc_inum)		proc_alloc_inum;
+	typeof(&proc_free_inum)			proc_free_inum;
+	typeof(&prepare_creds)			prepare_creds;
+	typeof(&commit_creds)			commit_creds;
+	typeof(&key_put)			key_put;
+	typeof(&register_pernet_subsys)		register_pernet_subsys;
+	typeof(&unregister_pernet_subsys)	unregister_pernet_subsys;
 
 	/* the single capability decision function, resolved for the trace only */
 	int (*cap_capable)(const struct cred *cred, struct user_namespace *targ_ns,

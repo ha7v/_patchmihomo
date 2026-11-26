@@ -45,6 +45,10 @@ int droid_lkm_misc_ksym_init(void)
 		typeof(droid_lkm_misc_ks.__ipv6_addr_type));
 	DROID_LKM_MISC_THUNK_OPT(__nf_ip6_route, "__nf_ip6_route",
 		typeof(droid_lkm_misc_ks.__nf_ip6_route));
+	DROID_LKM_MISC_THUNK_OPT(register_pernet_subsys, "register_pernet_subsys",
+		typeof(droid_lkm_misc_ks.register_pernet_subsys));
+	DROID_LKM_MISC_THUNK_OPT(unregister_pernet_subsys, "unregister_pernet_subsys",
+		typeof(droid_lkm_misc_ks.unregister_pernet_subsys));
 
 	DROID_LKM_MISC_THUNK(proc_alloc_inum, "proc_alloc_inum",
 		typeof(droid_lkm_misc_ks.proc_alloc_inum));

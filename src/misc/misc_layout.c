@@ -25,10 +25,10 @@ enum {
 	DROID_LKM_MISC_F_TASK_REAL_CRED,
 	DROID_LKM_MISC_F_TASK_FS,
 	DROID_LKM_MISC_F_TASK_NSPROXY,
+	DROID_LKM_MISC_F_MNTNS_NS,
 	DROID_LKM_MISC_F_MNTNS_USER_NS,
 	DROID_LKM_MISC_F_UTSNS_USER_NS,
 	DROID_LKM_MISC_F_NETNS_USER_NS,
-	DROID_LKM_MISC_F_NETNS_PASSIVE,
 	DROID_LKM_MISC_F_CGROUPNS_USER_NS,
 	DROID_LKM_MISC_F_TIMENS_USER_NS,
 	DROID_LKM_MISC_F_COUNT
@@ -51,6 +51,9 @@ static struct ds_compat_field droid_lkm_misc_fields[DROID_LKM_MISC_F_COUNT] = {
 		.type = "task_struct", .member = "nsproxy",
 		.build = offsetof(struct task_struct, nsproxy),
 	},
+	[DROID_LKM_MISC_F_MNTNS_NS] = {
+		.type = "mnt_namespace", .member = "ns",
+	},
 	[DROID_LKM_MISC_F_MNTNS_USER_NS] = {
 		.type = "mnt_namespace", .member = "user_ns",
 	},
@@ -59,9 +62,6 @@ static struct ds_compat_field droid_lkm_misc_fields[DROID_LKM_MISC_F_COUNT] = {
 	},
 	[DROID_LKM_MISC_F_NETNS_USER_NS] = {
 		.type = "net", .member = "user_ns",
-	},
-	[DROID_LKM_MISC_F_NETNS_PASSIVE] = {
-		.type = "net", .member = "passive",
 	},
 	[DROID_LKM_MISC_F_CGROUPNS_USER_NS] = {
 		.type = "cgroup_namespace", .member = "user_ns",
@@ -88,17 +88,17 @@ u32 droid_lkm_misc_task_cred_off;
 u32 droid_lkm_misc_task_real_cred_off;
 u32 droid_lkm_misc_task_fs_off;
 u32 droid_lkm_misc_task_nsproxy_off;
+u32 droid_lkm_misc_mntns_ns_off;
 u32 droid_lkm_misc_mntns_user_ns_off;
 u32 droid_lkm_misc_utsns_user_ns_off;
 u32 droid_lkm_misc_netns_user_ns_off;
-u32 droid_lkm_misc_netns_passive_off;
 u32 droid_lkm_misc_cgroupns_user_ns_off;
 u32 droid_lkm_misc_timens_user_ns_off;
 
+bool droid_lkm_misc_mntns_ns_ok;
 bool droid_lkm_misc_mntns_user_ns_ok;
 bool droid_lkm_misc_utsns_user_ns_ok;
 bool droid_lkm_misc_netns_user_ns_ok;
-bool droid_lkm_misc_netns_passive_ok;
 bool droid_lkm_misc_cgroupns_user_ns_ok;
 bool droid_lkm_misc_timens_user_ns_ok;
 
@@ -133,6 +133,11 @@ void droid_lkm_misc_layout_init(void)
 	droid_lkm_misc_task_nsproxy_off =
 		droid_lkm_misc_fields[DROID_LKM_MISC_F_TASK_NSPROXY].live;
 
+	droid_lkm_misc_mntns_ns_ok = ds_compat_layout_verified(
+		droid_lkm_misc_fields[DROID_LKM_MISC_F_MNTNS_NS].state);
+	droid_lkm_misc_mntns_ns_off = droid_lkm_misc_mntns_ns_ok ?
+		droid_lkm_misc_fields[DROID_LKM_MISC_F_MNTNS_NS].live : 0;
+
 	droid_lkm_misc_mntns_user_ns_ok = ds_compat_layout_verified(
 		droid_lkm_misc_fields[DROID_LKM_MISC_F_MNTNS_USER_NS].state);
 	droid_lkm_misc_mntns_user_ns_off = droid_lkm_misc_mntns_user_ns_ok ?
@@ -147,11 +152,6 @@ void droid_lkm_misc_layout_init(void)
 		droid_lkm_misc_fields[DROID_LKM_MISC_F_NETNS_USER_NS].state);
 	droid_lkm_misc_netns_user_ns_off = droid_lkm_misc_netns_user_ns_ok ?
 		droid_lkm_misc_fields[DROID_LKM_MISC_F_NETNS_USER_NS].live : 0;
-
-	droid_lkm_misc_netns_passive_ok = ds_compat_layout_verified(
-		droid_lkm_misc_fields[DROID_LKM_MISC_F_NETNS_PASSIVE].state);
-	droid_lkm_misc_netns_passive_off = droid_lkm_misc_netns_passive_ok ?
-		droid_lkm_misc_fields[DROID_LKM_MISC_F_NETNS_PASSIVE].live : 0;
 
 	droid_lkm_misc_cgroupns_user_ns_ok = ds_compat_layout_verified(
 		droid_lkm_misc_fields[DROID_LKM_MISC_F_CGROUPNS_USER_NS].state);

@@ -32,6 +32,7 @@ from typing import Callable, List, Optional, Tuple
 
 # AArch64 Linux syscall numbers (asm-generic/unistd.h; bionic omits SysV IPC / mq_*)
 NR_UNSHARE = 97
+NR_PRCTL = 167
 NR_GETPID = 172
 NR_MQ_OPEN = 180
 NR_MQ_UNLINK = 181
@@ -65,11 +66,16 @@ SETVAL = 16
 GETVAL = 12
 
 SIGCHLD = int(signal.SIGCHLD)
+CLONE_NEWTIME = 0x00000080
 CLONE_THREAD = 0x00010000
+CLONE_NEWNS = 0x00020000
 CLONE_SYSVSEM = 0x00040000
+CLONE_NEWCGROUP = 0x02000000
+CLONE_NEWUTS = 0x04000000
 CLONE_NEWIPC = 0x08000000
 CLONE_NEWUSER = 0x10000000
 CLONE_NEWPID = 0x20000000
+CLONE_NEWNET = 0x40000000
 
 O_RDWR = 2
 O_CREAT = 0o100
@@ -1136,7 +1142,7 @@ def test_userns_lpe_guard() -> Tuple[str, str]:
             os.setresgid(65534, 65534, 65534)
             os.setresuid(65534, 65534, 65534)
             # PR_SET_DUMPABLE = 4
-            libc.prctl(4, 1, 0, 0, 0)
+            sys_call(NR_PRCTL, 4, 1, 0, 0, 0)
 
         start_uid = os.geteuid()
         start_gid = os.getegid()
@@ -1211,6 +1217,133 @@ def test_userns_lpe_guard() -> Tuple[str, str]:
                 os.rmdir(canary_dir)
             except OSError:
                 pass
+
+
+def test_userns_object_leak_guard() -> Tuple[str, str]:
+    """Verify 0 fake userns object leaks across all 7 child namespaces + pinned nsfs fds."""
+    misc_status = Path("/proc/droid_lkm_misc/status")
+    if not misc_status.exists():
+        return "SKIP", "/proc/droid_lkm_misc/status not present"
+
+    def read_live() -> Optional[int]:
+        try:
+            txt = misc_status.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        m = re.search(r"^userns objects\s+ready\s+(\d+)\s+live of\s+\d+", txt, re.M)
+        return int(m.group(1)) if m else None
+
+    if read_live() is None:
+        return "SKIP", "/proc/droid_lkm_misc/status unreadable or userns inactive"
+
+    def wait_live_le(target: int, timeout: float = 5.0) -> int:
+        deadline = time.monotonic() + timeout
+        cur = read_live()
+        while cur is not None and cur > target and time.monotonic() < deadline:
+            time.sleep(0.05)
+            cur = read_live()
+        return cur if cur is not None else target
+
+    # Let any async RCU / cleanup_net work from earlier tests settle first
+    prev = read_live()
+    assert prev is not None
+    for _ in range(25):
+        time.sleep(0.08)
+        cur = read_live()
+        assert cur is not None
+        if cur == prev:
+            break
+        prev = cur
+    base = cur  # type: ignore[assignment]
+
+    combos = [
+        ("USER", CLONE_NEWUSER),
+        ("USER+NS", CLONE_NEWUSER | CLONE_NEWNS),
+        ("USER+UTS", CLONE_NEWUSER | CLONE_NEWUTS),
+        ("USER+IPC", CLONE_NEWUSER | CLONE_NEWIPC),
+        ("USER+PID", CLONE_NEWUSER | CLONE_NEWPID),
+        ("USER+NET", CLONE_NEWUSER | CLONE_NEWNET),
+        ("USER+CGROUP", CLONE_NEWUSER | CLONE_NEWCGROUP),
+        ("USER+TIME", CLONE_NEWUSER | CLONE_NEWTIME),
+    ]
+    checked: List[str] = []
+
+    for label, flags in combos:
+        pid = os.fork()
+        if pid == 0:
+            try:
+                ret, err = sys_call(NR_UNSHARE, flags)
+                if ret < 0:
+                    if flags != CLONE_NEWUSER and err in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP):
+                        os._exit(2)
+                    os._exit(1)
+                if flags & (CLONE_NEWPID | CLONE_NEWTIME):
+                    gcpid = os.fork()
+                    if gcpid == 0:
+                        os._exit(0)
+                    os.waitpid(gcpid, 0)
+                os._exit(0)
+            except BaseException:
+                os._exit(1)
+        _, wstatus = os.waitpid(pid, 0)
+        rc = os.waitstatus_to_exitcode(wstatus)
+        if rc == 2:
+            continue
+        if rc != 0:
+            return "FAIL", f"{label} child unshare failed (rc={rc})"
+        after = wait_live_le(base, timeout=5.0)
+        if after > base:
+            return "FAIL", f"{label} leaked {after - base} userns object(s) (base={base}, live={after})"
+        base = min(base, after)
+        checked.append(label)
+
+    # Exercise delayed nsfs eviction (mntns_operations.put + netns_put -> pernet_ops.exit)
+    if os.geteuid() == 0:
+        ready_r, ready_w = os.pipe()
+        go_r, go_w = os.pipe()
+        fds: List[int] = []
+        pid = os.fork()
+        if pid == 0:
+            os.close(ready_r)
+            os.close(go_w)
+            try:
+                ret, _ = sys_call(NR_UNSHARE, CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWNET)
+                os.write(ready_w, b"1" if ret == 0 else b"0")
+                os.close(ready_w)
+                _ = os.read(go_r, 1)
+                os.close(go_r)
+                os._exit(0 if ret == 0 else 1)
+            except BaseException:
+                os._exit(1)
+        os.close(ready_w)
+        os.close(go_r)
+        try:
+            tok = os.read(ready_r, 1)
+            os.close(ready_r)
+            if tok != b"1":
+                os.close(go_w)
+                os.waitpid(pid, 0)
+                return "FAIL", "pinned_nsfs child unshare(USER|NS|NET) failed"
+            for kind in ("mnt", "net", "user"):
+                fds.append(os.open(f"/proc/{pid}/ns/{kind}", os.O_RDONLY))
+            os.close(go_w)
+            os.waitpid(pid, 0)
+            # While nsfs fds are still open after task exit, userns MUST stay alive (no UAF)
+            pinned_live = read_live()
+            if pinned_live is not None and pinned_live <= base:
+                return "FAIL", f"premature userns drop while nsfs fds still open (base={base}, live={pinned_live})"
+        finally:
+            for fd in fds:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        after = wait_live_le(base, timeout=5.0)
+        if after > base:
+            return "FAIL", f"pinned nsfs (mnt+net+user) leaked {after - base} userns object(s) (base={base}, live={after})"
+        checked.append("pinned_nsfs(mnt+net+user)")
+
+    return "PASS", f"0 leaked userns objects across {', '.join(checked)} (baseline={base})"
 
 
 def test_devtmpfs_registered() -> Tuple[str, str]:
@@ -1315,6 +1448,7 @@ def run_local_suite(include_bwrap: bool = False, include_stress: bool = False) -
         )
     if include_bwrap:
         tests.append(("bwrap_smoke", test_bwrap_smoke))
+    tests.append(("userns_object_leak_guard", test_userns_object_leak_guard))
 
     results: List[TestResult] = []
     for name, fn in tests:
