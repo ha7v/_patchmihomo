@@ -23,6 +23,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1093,7 +1094,9 @@ def test_userns_state_machine() -> Tuple[str, str]:
 
         # 4. execve inside fake userns exercises set_cred_ucounts + release_task
         #    dec_rlimit_ucounts balance (no kernel/ucount.c WARN_ON_ONCE).
-        for true_bin in ("/bin/true", "/usr/bin/true", "/system/bin/true"):
+        #    Prefer /system/bin/true on Android so Termux libtermux-exec.so does
+        #    not rewrite /bin/true into a 0700 app-private path.
+        for true_bin in ("/system/bin/true", "/bin/true", "/usr/bin/true"):
             if os.path.exists(true_bin):
                 r = subprocess.run([true_bin], capture_output=True, timeout=5)
                 if r.returncode != 0:
@@ -1103,6 +1106,111 @@ def test_userns_state_machine() -> Tuple[str, str]:
         return "PASS", f"unshare(CLONE_NEWUSER) + one-shot uid/gid_map + monotonic setgroups + execve ok ({ns_link})"
 
     return run_in_child(child)
+
+
+def test_userns_lpe_guard() -> Tuple[str, str]:
+    """Regression guard for P0-1: confined fake userns must block CAP_SETUID/GID LPE."""
+    misc_status = Path("/proc/droid_lkm_misc/status")
+    has_userns_mod = False
+    if misc_status.exists():
+        try:
+            has_userns_mod = "userns                   ready" in misc_status.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+
+    canary_dir: Optional[str] = None
+    canary_path: Optional[str] = None
+    if os.geteuid() == 0:
+        base = "/data/local/tmp" if os.path.isdir("/data/local/tmp") else "/tmp"
+        canary_dir = tempfile.mkdtemp(prefix="dlm_lpe_", dir=base)
+        os.chmod(canary_dir, 0o755)
+        canary_path = os.path.join(canary_dir, "root_only")
+        with open(canary_path, "wb") as f:
+            f.write(b"root-secret\n")
+        os.chown(canary_path, 0, 0)
+        os.chmod(canary_path, 0o600)
+
+    def child() -> Tuple[str, str]:
+        if os.geteuid() == 0:
+            os.setgroups([])
+            os.setresgid(65534, 65534, 65534)
+            os.setresuid(65534, 65534, 65534)
+            # PR_SET_DUMPABLE = 4
+            libc.prctl(4, 1, 0, 0, 0)
+
+        start_uid = os.geteuid()
+        start_gid = os.getegid()
+        if start_uid == 0:
+            return "SKIP", "could not drop to unprivileged uid"
+
+        ret, err = sys_call(NR_UNSHARE, CLONE_NEWUSER)
+        if ret < 0:
+            if not has_userns_mod and err in (errno.EINVAL, errno.ENOSYS, errno.EPERM):
+                return "SKIP", f"CLONE_NEWUSER unavailable (errno={err})"
+            return "FAIL", f"unshare(CLONE_NEWUSER) failed: errno={err}"
+
+        # 1. setresuid / setuid / setresgid to root or foreign ID must fail EPERM
+        for label, fn in (
+            ("setresuid(0,0,0)", lambda: os.setresuid(0, 0, 0)),
+            ("setuid(0)", lambda: os.setuid(0)),
+            ("setresgid(0,0,0)", lambda: os.setresgid(0, 0, 0)),
+            ("setresgid(42,42,42)", lambda: os.setresgid(42, 42, 42)),
+        ):
+            try:
+                fn()
+                return "FAIL", f"LPE regression: {label} succeeded from uid={start_uid}"
+            except PermissionError:
+                pass
+            except OSError as exc:
+                if exc.errno != errno.EPERM:
+                    return "FAIL", f"{label} unexpected errno={exc.errno}"
+
+        # 2. setfsuid(0) / setfsgid(0) must NOT switch fsuid/fsgid away from caller
+        NR_SETFSUID = 151
+        NR_SETFSGID = 152
+        sys_call(NR_SETFSUID, 0)
+        cur_fsuid, _ = sys_call(NR_SETFSUID, 0xFFFFFFFF)
+        if cur_fsuid == 0:
+            return "FAIL", f"LPE regression: setfsuid(0) switched fsuid to 0 from uid={start_uid}"
+        sys_call(NR_SETFSGID, 0)
+        cur_fsgid, _ = sys_call(NR_SETFSGID, 0xFFFFFFFF)
+        if cur_fsgid == 0:
+            return "FAIL", f"LPE regression: setfsgid(0) switched fsgid to 0 from gid={start_gid}"
+
+        # 3. Root-only file access must still fail EACCES
+        probe_file = canary_path if canary_path else ("/etc/shadow" if os.path.exists("/etc/shadow") else None)
+        if probe_file:
+            try:
+                with open(probe_file, "rb") as f:
+                    _ = f.read(16)
+                return "FAIL", f"LPE regression: unprivileged fake userns read {probe_file}"
+            except PermissionError:
+                pass
+
+        # 4. kill(1, 0) against outside root init must still fail EPERM
+        try:
+            os.kill(1, 0)
+            return "FAIL", "LPE regression: kill(1, 0) allowed from unprivileged fake userns"
+        except PermissionError:
+            pass
+        except ProcessLookupError:
+            pass
+
+        return "PASS", f"unprivileged fake userns blocked set*uid/setfsuid/set*gid/root-file/kill(1) (uid={start_uid})"
+
+    try:
+        return run_in_child(child)
+    finally:
+        if canary_path and os.path.exists(canary_path):
+            try:
+                os.unlink(canary_path)
+            except OSError:
+                pass
+        if canary_dir and os.path.isdir(canary_dir):
+            try:
+                os.rmdir(canary_dir)
+            except OSError:
+                pass
 
 
 def test_devtmpfs_registered() -> Tuple[str, str]:
@@ -1193,6 +1301,7 @@ def run_local_suite(include_bwrap: bool = False, include_stress: bool = False) -
         ("setns_ipc_and_pid", test_setns_ipc_and_pid),
         ("unpriv_ns_perm", test_unpriv_ns_perm),
         ("userns_state_machine", test_userns_state_machine),
+        ("userns_lpe_guard", test_userns_lpe_guard),
         ("devtmpfs_registered", test_devtmpfs_registered),
     ]
     if include_stress:

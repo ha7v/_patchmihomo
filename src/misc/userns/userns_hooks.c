@@ -244,6 +244,20 @@ droid_lkm_userns_seccap_eval(const struct cred *cred, struct user_namespace *ns,
 	cred_u = droid_lkm_userns_from_ns(cred->user_ns);
 
 	/*
+	 * P0-1 LPE defense: under CONFIG_USER_NS=n, make_kuid()/make_kgid()
+	 * ignore uid_map/gid_map. Confined (!privileged) fake userns tasks
+	 * must never pass CAP_SETUID or CAP_SETGID checks (even via the
+	 * parent-owner rule), otherwise setresuid(0)/setfsuid(0)/setresgid()
+	 * directly mutates global host credentials and bypasses VFS DAC.
+	 */
+	if ((cap == CAP_SETUID || cap == CAP_SETGID) && !targ_u->privileged) {
+		if (!cred_u)
+			return orig(cred, droid_lkm_userns_init_uns, cap, opts);
+		if (!cred_u->privileged)
+			return -EPERM;
+	}
+
+	/*
 	 * Mirrors cap_capable() from security/commoncap.c:
 	 * examine target namespace and all of its ancestors.
 	 */
@@ -334,21 +348,15 @@ DROID_LKM_ENTRY __nocfi noinline int droid_lkm_userns_nsproxy_wrap(unsigned long
 	}
 
 	ds_hook_leave(&droid_lkm_userns_nsproxy_hook);
+	/*
+	 * Per-namespace ownership (mnt/uts/net/cgroup/time/ipc) is attached
+	 * with paired refcounts inside copy_* hooks (userns_owner.c) and
+	 * droid_lkm_ipcns_create(), covering both unshare() and clone().
+	 */
 	nsp = droid_lkm_misc_ks.create_new_namespaces(unshare_flags, current, &u->uns,
 						      new_fs ? new_fs : droid_lkm_misc_task_fs(current));
 	if (IS_ERR(nsp))
 		return PTR_ERR(nsp);
-
-	if (unshare_flags & CLONE_NEWUTS)
-		nsp->uts_ns->user_ns = &u->uns;
-	if ((unshare_flags & CLONE_NEWIPC) && nsp->ipc_ns)
-		nsp->ipc_ns->user_ns = &u->uns;
-	if (unshare_flags & CLONE_NEWNET)
-		nsp->net_ns->user_ns = &u->uns;
-	if (unshare_flags & CLONE_NEWCGROUP)
-		nsp->cgroup_ns->user_ns = &u->uns;
-	if ((unshare_flags & CLONE_NEWTIME) && nsp->time_ns_for_children)
-		nsp->time_ns_for_children->user_ns = &u->uns;
 
 	*new_nsp = nsp;
 	return 0;
@@ -400,7 +408,8 @@ DROID_LKM_ENTRY __nocfi noinline int droid_lkm_userns_unshare_wrap(unsigned long
 	ret = orig(rest);
 	ds_hook_leave(&droid_lkm_userns_unshare_hook);
 	if (ret) {
-		droid_lkm_misc_ks.commit_creds((struct cred *)old);
+		droid_lkm_userns_rollback_current(old);
+		put_cred(old);
 		droid_lkm_userns_put(u);
 		return ret;
 	}
@@ -872,29 +881,56 @@ int droid_lkm_userns_hooks_init(void)
 	if (ret)
 		goto out_nsproxy;
 
-	if (droid_lkm_misc_sym("alloc_ucounts")) {
-		ret = droid_lkm_userns_hook_lowfreq(
-			&droid_lkm_userns_allocuc_hook, "alloc_ucounts",
-			"droid_lkm_userns_allocuc_wrap",
-			(void **)&droid_lkm_userns_allocuc_orig,
-			HK_REDIR_GUARD_CALLER);
-		if (ret)
-			goto out_incuc;
-	}
+	{
+		bool has_alloc = false;
+		bool has_setcred = false;
+
+		if (droid_lkm_misc_sym("alloc_ucounts")) {
+			ret = droid_lkm_userns_hook_lowfreq(
+				&droid_lkm_userns_allocuc_hook, "alloc_ucounts",
+				"droid_lkm_userns_allocuc_wrap",
+				(void **)&droid_lkm_userns_allocuc_orig,
+				HK_REDIR_GUARD_CALLER);
+			if (ret)
+				goto out_incuc;
+			has_alloc = true;
+		}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 14, 0)
-	if (droid_lkm_misc_sym("set_cred_ucounts")) {
-		ret = droid_lkm_userns_hook_hot(
-			&droid_lkm_userns_setcreduc_hook, "set_cred_ucounts",
-			"droid_lkm_userns_setcreduc_wrap",
-			(void **)&droid_lkm_userns_setcreduc_orig,
-			HK_REDIR_GUARD_CALLER);
-		if (ret)
-			goto out_allocuc;
-	}
+		if (droid_lkm_misc_sym("set_cred_ucounts")) {
+			ret = droid_lkm_userns_hook_hot(
+				&droid_lkm_userns_setcreduc_hook,
+				"set_cred_ucounts",
+				"droid_lkm_userns_setcreduc_wrap",
+				(void **)&droid_lkm_userns_setcreduc_orig,
+				HK_REDIR_GUARD_CALLER);
+			if (ret)
+				goto out_allocuc;
+			has_setcred = true;
+		}
+
+		/* P1-4: Report actual ucounts hook coverage honestly */
+		if (has_alloc && has_setcred)
+			droid_lkm_misc_report("userns ucounts", "ready",
+					      "init_user_ns (inc+alloc+setcred)");
+		else if (has_setcred)
+			droid_lkm_misc_report("userns ucounts", "ready",
+					      "init_user_ns (inc+setcred)");
+		else if (has_alloc)
+			droid_lkm_misc_report("userns ucounts", "ready",
+					      "init_user_ns (inc+alloc)");
+		else {
+			droid_lkm_misc_warn("userns ucounts: neither alloc_ucounts nor set_cred_ucounts found\n");
+			droid_lkm_misc_report("userns ucounts", "degraded",
+					      "inc_ucount only (cred ucounts hooks absent)");
+		}
+#else
+		(void)has_setcred;
+		droid_lkm_misc_report("userns ucounts", "ready",
+				      has_alloc ? "init_user_ns (inc+alloc)" :
+						  "init_user_ns (inc)");
 #endif
-	droid_lkm_misc_report("userns ucounts", "ready",
-			      "redirected to init_user_ns");
+	}
 
 	/* Optional chown translation (F8: chown_common preferred over fchownat) */
 	if (droid_lkm_misc_sym("chown_common") &&

@@ -185,9 +185,30 @@ const struct proc_ns_operations *droid_lkm_userns_ops_for(struct task_struct *ta
 	return droid_lkm_userns_host_ops;
 }
 
+static DROID_LKM_ENTRY __nocfi noinline struct user_namespace *
+droid_lkm_userns_ref_get(struct user_namespace *ns)
+{
+	struct droid_lkm_userns *u = droid_lkm_userns_from_ns(ns);
+
+	if (u && droid_lkm_userns_get(u))
+		return &u->uns;
+	return NULL;
+}
+
+static DROID_LKM_ENTRY __nocfi noinline void
+droid_lkm_userns_ref_put(struct user_namespace *ns)
+{
+	struct droid_lkm_userns *u = droid_lkm_userns_from_ns(ns);
+
+	if (u)
+		droid_lkm_userns_put(u);
+}
+
 static const struct droid_lkm_ns_kind_reg droid_lkm_userns_kind = {
 	.name = "user",
 	.ops_for = droid_lkm_userns_ops_for,
+	.get_user_ns = droid_lkm_userns_ref_get,
+	.put_user_ns = droid_lkm_userns_ref_put,
 };
 
 int droid_lkm_userns_nsops_init(void)

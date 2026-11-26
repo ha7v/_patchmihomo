@@ -110,6 +110,7 @@ bool droid_lkm_userns_is_ours(const struct user_namespace *uns);
 
 int droid_lkm_userns_install_current(struct droid_lkm_userns *u);
 int droid_lkm_userns_install_cred(struct cred *new, struct droid_lkm_userns *u);
+void droid_lkm_userns_rollback_current(const struct cred *saved);
 void droid_lkm_userns_cred_fail_closed(struct cred *new);
 
 const struct proc_ns_operations *droid_lkm_userns_ops(void);

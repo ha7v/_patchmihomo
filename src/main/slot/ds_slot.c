@@ -14,6 +14,7 @@
 #include <linux/rcupdate.h>
 #include <linux/srcu.h>
 #include <linux/tracepoint.h>
+#include <trace/events/sched.h>
 #include <linux/reboot.h>
 #include <linux/string.h>
 #include <asm/ptrace.h>
@@ -583,16 +584,40 @@ static __nocfi noinline void droid_lkm_tp_sync(void)
 	synchronize_rcu();
 }
 
+/*
+ * Linux 6.16 extended TRACE_EVENT(sched_process_exit) from (struct task_struct *p)
+ * to (struct task_struct *p, bool group_dead). Match the exact prototype so
+ * CONFIG_CFI_CLANG=y KCFI hash checks pass on both <=6.15 and 6.16+/6.18.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+static DROID_LKM_ENTRY __nocfi noinline void
+droid_lkm_sched_process_exit_tp(void *data, struct task_struct *p,
+				bool group_dead)
+{
+	(void)data;
+	(void)group_dead;
+	droid_lkm_pidns_exit_cleanup(p);
+}
+#else
 static DROID_LKM_ENTRY __nocfi noinline void
 droid_lkm_sched_process_exit_tp(void *data, struct task_struct *p)
 {
 	(void)data;
 	droid_lkm_pidns_exit_cleanup(p);
 }
+#endif
 
 static int droid_lkm_exit_tp_install(void)
 {
 	int ret;
+
+	/*
+	 * Compile-time KCFI prototype gate: unevaluated sizeof() forces strict
+	 * function-pointer type matching against <trace/events/sched.h> without
+	 * emitting a link-time reference to __tracepoint_sched_process_exit.
+	 */
+	(void)sizeof(register_trace_sched_process_exit(
+		droid_lkm_sched_process_exit_tp, NULL));
 
 	droid_lkm_exit_tp = (struct tracepoint *)droid_lkm_sym(
 		"__tracepoint_sched_process_exit");

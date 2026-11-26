@@ -41,6 +41,7 @@
 #include "ds_ksym.h"
 #include "ds_ipcns.h"
 #include "ds_nsops.h"
+#include "ds_proc.h"
 
 /* for_each_process_thread embeds &init_task, a trimmed image may not export it */
 #define droid_lkm_for_each_process_thread(p, t)				\
@@ -327,6 +328,28 @@ void droid_lkm_pidns_put(struct pid_namespace *ns)
 	if (ns && ns != &init_pid_ns && !refcount_dec_not_one(droid_lkm_pidns_refcount(ns)))
 		droid_lkm_dbg("pidns %p refcount one not dropped\n", ns);
 }
+
+/*
+ * Detach any fake pid_namespace that still points at a dying fake
+ * user_namespace before the userns object is freed via RCU.
+ */
+DROID_LKM_ENTRY void droid_lkm_pidns_detach_user_ns(struct user_namespace *uns)
+{
+	struct droid_lkm_pidns_entry *e;
+	unsigned long flags;
+
+	if (!uns || uns == droid_lkm_ks.init_user_ns)
+		return;
+
+	spin_lock_irqsave(&droid_lkm_pidns_lock, flags);
+	list_for_each_entry(e, &droid_lkm_pidns_list, node) {
+		if (e->ns && droid_lkm_pidns_user_ns(e->ns) == uns)
+			droid_lkm_pidns_set_user_ns(e->ns,
+						    droid_lkm_ks.init_user_ns);
+	}
+	spin_unlock_irqrestore(&droid_lkm_pidns_lock, flags);
+}
+EXPORT_SYMBOL_GPL(droid_lkm_pidns_detach_user_ns);
 
 struct pid_namespace *droid_lkm_pidns_task_for_children(struct task_struct *task)
 {

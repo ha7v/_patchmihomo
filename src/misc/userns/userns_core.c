@@ -22,6 +22,7 @@
 #include "misc_ksym.h"
 #include "misc_proc.h"
 #include "userns.h"
+#include "ds_proc.h"
 
 #define DROID_LKM_USERNS_MAX 1024
 
@@ -92,6 +93,8 @@ void droid_lkm_userns_put(struct droid_lkm_userns *u)
 			droid_lkm_userns_count--;
 		spin_unlock_irqrestore(&droid_lkm_userns_lock, flags);
 
+		/* Clear any surviving fake pid_namespace->user_ns before RCU free */
+		droid_lkm_pidns_detach_user_ns(&u->uns);
 		droid_lkm_userns_queue_rcu_free(u);
 	}
 }
@@ -179,6 +182,7 @@ struct droid_lkm_userns *droid_lkm_userns_create(struct droid_lkm_userns *parent
 {
 	struct droid_lkm_userns *u;
 	unsigned int inum;
+	bool got_parent = false;
 	int ret, i;
 
 	if (parent && parent->level > 32)
@@ -225,6 +229,7 @@ struct droid_lkm_userns *droid_lkm_userns_create(struct droid_lkm_userns *parent
 			ret = -EINVAL;
 			goto out_discard;
 		}
+		got_parent = true;
 	}
 
 	/*
@@ -269,7 +274,7 @@ struct droid_lkm_userns *droid_lkm_userns_create(struct droid_lkm_userns *parent
 	return u;
 
 out_discard:
-	if (parent)
+	if (got_parent)
 		droid_lkm_userns_put(parent);
 	droid_lkm_misc_ks.proc_free_inum(inum);
 	kfree(u);
@@ -294,13 +299,14 @@ static void droid_lkm_userns_objects_detail(char *buf, size_t size)
 
 /*
  * why the module cannot be unloaded once the fake user namespace is offered. the counts
- * this module owns are already safe: a credential, a mount namespace and an fs_context
- * each hold a reference, because get_user_ns() and put_user_ns() are stubs here. what no
- * count reaches is the procfs inode -- the pid directory hook and the id map files store
- * this module's operations in inodes that take no reference, cannot be enumerated, and
- * outlive the namespace objects behind them. so the reference is taken at ns kind
- * registration and never given back: delete_module() answers -EBUSY from then on.
- * devtmpfs and xt can still be released through the release parameter; this cannot
+ * this module owns are already safe: credentials and owned namespaces (mnt/uts/net/
+ * cgroup/time/ipc) each hold a reference, because get_user_ns() and put_user_ns() are
+ * stubs here (fs_context borrows current's cred ref during synchronous mount setup).
+ * what no count reaches is the procfs inode -- the pid directory hook and the id map
+ * files store this module's operations in inodes that take no reference, cannot be
+ * enumerated, and outlive the namespace objects behind them. so the reference is taken
+ * at ns kind registration and never given back: delete_module() answers -EBUSY from
+ * then on. devtmpfs and xt can still be released through the release parameter; this cannot
  */
 void droid_lkm_userns_stay_resident(const char *why)
 {

@@ -93,6 +93,62 @@ static enum droid_lkm_ns_kind droid_lkm_ns_name_kind(const char *name, unsigned 
 
 static const struct droid_lkm_ns_kind_reg *droid_lkm_ns_kinds[DROID_LKM_NS_KIND_MAX];
 static DEFINE_MUTEX(droid_lkm_ns_kinds_lock);
+static struct user_namespace *(*droid_lkm_ext_userns_get)(struct user_namespace *ns);
+static void (*droid_lkm_ext_userns_put)(struct user_namespace *ns);
+
+static void droid_lkm_ns_kind_sync_userns_locked(void)
+{
+	struct user_namespace *(*get_fn)(struct user_namespace *) = NULL;
+	void (*put_fn)(struct user_namespace *) = NULL;
+	int i;
+
+	for (i = 0; i < DROID_LKM_NS_KIND_MAX; i++) {
+		const struct droid_lkm_ns_kind_reg *kind = droid_lkm_ns_kinds[i];
+
+		if (!kind || strcmp(kind->name, "user"))
+			continue;
+		get_fn = kind->get_user_ns;
+		put_fn = kind->put_user_ns;
+		break;
+	}
+	WRITE_ONCE(droid_lkm_ext_userns_get, get_fn);
+	WRITE_ONCE(droid_lkm_ext_userns_put, put_fn);
+}
+
+__nocfi noinline struct user_namespace *
+droid_lkm_userns_hold(struct user_namespace *ns)
+{
+	struct user_namespace *(*get_fn)(struct user_namespace *);
+	struct user_namespace *init_uns = droid_lkm_ks.init_user_ns;
+
+	if (!ns || ns == init_uns)
+		return init_uns;
+
+	get_fn = READ_ONCE(droid_lkm_ext_userns_get);
+	if (get_fn) {
+		struct user_namespace *held = get_fn(ns);
+
+		if (held)
+			return held;
+		return init_uns;
+	}
+	return droid_lkm_get_user_ns(ns);
+}
+
+__nocfi noinline void droid_lkm_userns_drop(struct user_namespace *ns)
+{
+	void (*put_fn)(struct user_namespace *);
+	struct user_namespace *init_uns = droid_lkm_ks.init_user_ns;
+
+	if (!ns || ns == init_uns)
+		return;
+
+	put_fn = READ_ONCE(droid_lkm_ext_userns_put);
+	if (put_fn)
+		put_fn(ns);
+	else
+		put_user_ns(ns);
+}
 
 DROID_LKM_ENTRY int droid_lkm_ns_kind_register(const struct droid_lkm_ns_kind_reg *kind)
 {
@@ -104,6 +160,7 @@ DROID_LKM_ENTRY int droid_lkm_ns_kind_register(const struct droid_lkm_ns_kind_re
 	mutex_lock(&droid_lkm_ns_kinds_lock);
 	for (i = 0; i < DROID_LKM_NS_KIND_MAX; i++) {
 		if (droid_lkm_ns_kinds[i] == kind) {
+			droid_lkm_ns_kind_sync_userns_locked();
 			mutex_unlock(&droid_lkm_ns_kinds_lock);
 			return 0;
 		}
@@ -111,6 +168,7 @@ DROID_LKM_ENTRY int droid_lkm_ns_kind_register(const struct droid_lkm_ns_kind_re
 	for (i = 0; i < DROID_LKM_NS_KIND_MAX; i++) {
 		if (!droid_lkm_ns_kinds[i]) {
 			droid_lkm_ns_kinds[i] = kind;
+			droid_lkm_ns_kind_sync_userns_locked();
 			mutex_unlock(&droid_lkm_ns_kinds_lock);
 			return 0;
 		}
@@ -129,6 +187,7 @@ DROID_LKM_ENTRY void droid_lkm_ns_kind_unregister(const struct droid_lkm_ns_kind
 		if (droid_lkm_ns_kinds[i] == kind)
 			droid_lkm_ns_kinds[i] = NULL;
 	}
+	droid_lkm_ns_kind_sync_userns_locked();
 	mutex_unlock(&droid_lkm_ns_kinds_lock);
 }
 EXPORT_SYMBOL_GPL(droid_lkm_ns_kind_unregister);

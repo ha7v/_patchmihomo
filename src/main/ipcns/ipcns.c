@@ -28,6 +28,7 @@
 #include "ipc_sysctl.h"
 #include "ipc_mqueue_compat.h"
 #include "ds_nsops.h"
+#include "ds_proc.h"
 #include "ipc_util.h"
 
 /*
@@ -211,9 +212,9 @@ out_kernel_ns:
 
 	droid_lkm_ns_set_ops(&ns->ns, &droid_lkm_ipcns_ops, CLONE_NEWIPC);
 	refcount_set(droid_lkm_ipcns_refcount(ns), 1);
-	/* same ownership rule as the fake pid namespace, see droid_lkm_pidns_create */
-	droid_lkm_ipcns_set_user_ns(ns, droid_lkm_task_cred(current)->user_ns);
-	droid_lkm_get_user_ns(droid_lkm_ipcns_user_ns(ns));
+	/* Hold a real ref on fake user_ns when droid_lkm_misc is active (P0-2) */
+	droid_lkm_ipcns_set_user_ns(
+		ns, droid_lkm_userns_hold(droid_lkm_task_cred(current)->user_ns));
 	droid_lkm_ipcns_trace("create", ns);
 	droid_lkm_ns_ptr(ns, DROID_LKM_F_IPC_NS_UCOUNTS, struct ucounts) = NULL;
 
@@ -261,8 +262,12 @@ out_ids:
 	ds_free_ipc_ns(ns);
 	return ERR_PTR(err);
 out_inum:
-	if (droid_lkm_ipcns_user_ns(ns))
-		put_user_ns(droid_lkm_ipcns_user_ns(ns));
+	{
+		struct user_namespace *old_uns = droid_lkm_ipcns_user_ns(ns);
+
+		droid_lkm_ipcns_set_user_ns(ns, NULL);
+		droid_lkm_userns_drop(old_uns);
+	}
 	droid_lkm_ks.proc_free_inum(ns->ns.inum);
 out_free:
 	kfree(ns);
@@ -290,8 +295,12 @@ static __nocfi noinline void ds_free_ipc_ns(struct ipc_namespace *ns)
 	droid_lkm_ipc_sysctls_retire(ns);
 	droid_lkm_ipcns_destroy_ids(ns);
 
-	if (droid_lkm_ipcns_user_ns(ns))
-		put_user_ns(droid_lkm_ipcns_user_ns(ns));
+	{
+		struct user_namespace *old_uns = droid_lkm_ipcns_user_ns(ns);
+
+		droid_lkm_ipcns_set_user_ns(ns, NULL);
+		droid_lkm_userns_drop(old_uns);
+	}
 	if (ns->ns.inum)
 		droid_lkm_ks.proc_free_inum(ns->ns.inum);
 	kfree(ns);

@@ -17,6 +17,18 @@ extern u32 droid_lkm_misc_task_real_cred_off;
 extern u32 droid_lkm_misc_task_fs_off;
 extern u32 droid_lkm_misc_task_nsproxy_off;
 extern u32 droid_lkm_misc_mntns_user_ns_off;
+extern u32 droid_lkm_misc_utsns_user_ns_off;
+extern u32 droid_lkm_misc_netns_user_ns_off;
+extern u32 droid_lkm_misc_netns_passive_off;
+extern u32 droid_lkm_misc_cgroupns_user_ns_off;
+extern u32 droid_lkm_misc_timens_user_ns_off;
+
+extern bool droid_lkm_misc_mntns_user_ns_ok;
+extern bool droid_lkm_misc_utsns_user_ns_ok;
+extern bool droid_lkm_misc_netns_user_ns_ok;
+extern bool droid_lkm_misc_netns_passive_ok;
+extern bool droid_lkm_misc_cgroupns_user_ns_ok;
+extern bool droid_lkm_misc_timens_user_ns_ok;
 
 static inline const struct cred *droid_lkm_misc_task_cred(const struct task_struct *task)
 {
